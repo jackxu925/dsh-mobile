@@ -1,0 +1,13 @@
+{
+  "name": "DSH Mobile",
+  "short_name": "DSH",
+  "description": "DeepSeek Harness mobile surface",
+  "start_url": "/m/",
+  "scope": "/m/",
+  "display": "standalone",
+  "background_color": "#0b0e14",
+  "theme_color": "#0b0e14",
+  "icons": [
+    { "src": "/m/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}
