@@ -1041,16 +1041,14 @@ function buildShell() {
 
 /* ================= 启动 ================= */
 buildShell()
-/* 键盘适配：键盘弹起时 visualViewport 明显变矮，让 #app 跟随它，
-   输入框贴住键盘上沿（配合 CSS :focus-within 去掉 safe-area 底距）。 */
+/* 高度精确化：始终用 visualViewport 的像素高度钉死 #app。
+   独立 PWA 模式下 dvh 可能算不准（底部留黑边），键盘弹起时也靠它贴住键盘上沿。 */
 if (window.visualViewport) {
   const app = $('#app')
-  const applyVV = () => {
-    const vv = window.visualViewport
-    if (vv.height < window.innerHeight - 120) app.style.height = vv.height + 'px'
-    else app.style.height = ''
-  }
+  const applyVV = () => { app.style.height = Math.round(window.visualViewport.height) + 'px' }
+  applyVV()
   window.visualViewport.addEventListener('resize', applyVV)
+  window.addEventListener('orientationchange', () => setTimeout(applyVV, 120))
 }
 window.addEventListener('hashchange', route)
 document.addEventListener('visibilitychange', () => {

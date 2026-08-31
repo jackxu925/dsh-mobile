@@ -115,7 +115,7 @@ body {
 /* ============ 底部 Tab ============ */
 .tabbar {
   flex:none; display:flex;
-  padding-bottom: env(safe-area-inset-bottom, 0px);
+  padding-bottom: calc(env(safe-area-inset-bottom, 0px) / 2);
   background: rgba(18,22,31,.92);
   backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
   border-top: .5px solid var(--line);
@@ -236,10 +236,10 @@ body {
   flex:none;
   background:rgba(18,22,31,.94); backdrop-filter:blur(20px); -webkit-backdrop-filter:blur(20px);
   border-top:.5px solid var(--line);
-  padding:6px 12px calc(6px + env(safe-area-inset-bottom, 0px));
+  padding:6px 12px calc(4px + env(safe-area-inset-bottom, 0px) / 2);
 }
 /* 键盘弹起时：home 指示条区域已被键盘覆盖，输入框直接贴到键盘上沿 */
-.composer-wrap:focus-within { padding-bottom: 6px; }
+.composer-wrap:focus-within { padding-bottom: 4px; }
 .running-bar { display:none; align-items:center; gap:8px; padding:0 4px 8px; font-size:12.5px; color:#6aa6ff; }
 .running-bar.show { display:flex; }
 .running-bar .stop {
