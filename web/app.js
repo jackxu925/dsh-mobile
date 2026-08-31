@@ -1041,14 +1041,18 @@ function buildShell() {
 
 /* ================= 启动 ================= */
 buildShell()
-/* 高度精确化：始终用 visualViewport 的像素高度钉死 #app。
-   独立 PWA 模式下 dvh 可能算不准（底部留黑边），键盘弹起时也靠它贴住键盘上沿。 */
+/* 键盘适配：只在键盘很可能弹起时（visualViewport 明显小于布局视口）才把
+   #app 钉到可视高度，让输入框贴住键盘上沿；其余情况保持 CSS 的 100% 高度。
+   注意：不要在启动时无条件钉像素高度 —— iOS 独立 PWA 首屏的 vv 值不可靠，
+   会把整个页面压短、底部留出大片黑边。 */
 if (window.visualViewport) {
   const app = $('#app')
-  const applyVV = () => { app.style.height = Math.round(window.visualViewport.height) + 'px' }
-  applyVV()
+  const applyVV = () => {
+    const vv = window.visualViewport
+    if (vv.height < window.innerHeight - 120) app.style.height = Math.round(vv.height) + 'px'
+    else app.style.height = ''
+  }
   window.visualViewport.addEventListener('resize', applyVV)
-  window.addEventListener('orientationchange', () => setTimeout(applyVV, 120))
 }
 window.addEventListener('hashchange', route)
 document.addEventListener('visibilitychange', () => {

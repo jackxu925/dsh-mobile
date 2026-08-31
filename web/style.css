@@ -28,7 +28,7 @@ body {
   overscroll-behavior: none;
   overflow: hidden;  /* 页面整体不滚动，滚动只发生在各 .scroll 容器内；配合 visualViewport 键盘适配 */
 }
-#app { height: 100dvh; display: flex; flex-direction: column; }
+#app { height: 100%; display: flex; flex-direction: column; }
 
 /* ============ 视图切换 ============ */
 .view { display:none; flex-direction:column; height:100%; animation: fadein .16s ease; }
