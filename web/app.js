@@ -98,6 +98,21 @@ async function respondCancel(rpcId) {
     body: JSON.stringify({ type: 'client-response', rpcId, result: { ok: false, error: { code: 'cancelled', message: 'cancelled from mobile', details: {} } } }),
   }).catch(() => {})
 }
+/* Typert remote（网关拦截的 /api/<namespace>/<method>，如 commands/execute） */
+async function remote(endpoint, args) {
+  const r = await fetch('/api/' + endpoint, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ type: 'client-request', rpcId: uuid(), method: endpoint, payload: { args } }),
+  })
+  if (!r.ok) throw new Error(endpoint + ': HTTP ' + r.status)
+  const full = await r.json()
+  if (!full.result || !full.result.ok) {
+    const err = full.result && full.result.error
+    throw new Error((err && err.message) || (endpoint + ' failed'))
+  }
+  return full.result.value
+}
 
 /* ================= 状态 ================= */
 const S = {
@@ -120,6 +135,8 @@ function sess(id) {
       questions: new Map(),            // rpcId → {questions, outcome}
       callArgs: new Map(),             // callId → {name, args}
       lastPreview: '',
+      permissions: null,               // {options:[{value,name,description?}], currentValue}
+      models: null,                    // session.models 缓存 {current, groups, failures, routable}
     }
     S.sessions.set(id, s)
   }
@@ -590,6 +607,11 @@ async function loadHistory(s) {
   for (const entry of v.events || []) foldEvent(s, entry.event, entry.view)
   s.hasMore = !!v.hasMore
   s.oldestSeq = (v.events && v.events.length) ? v.events[0].event.seq : null
+  const values = v.projections && v.projections.values
+  if (values) {
+    if (typeof values.title === 'string' && values.title) s.title = values.title
+    if (values.permissions && Array.isArray(values.permissions.options)) s.permissions = values.permissions
+  }
   s.loaded = true
 }
 async function loadEarlier(s) {
@@ -706,6 +728,10 @@ function handleMux(rpcId, p) {
         renderList()
         if (S.current === s.id) $('#chat-title').textContent = sessTitle(s)
       }
+      if (s && p.key === 'permissions' && p.value && Array.isArray(p.value.options)) {
+        s.permissions = p.value
+        if (S.current === s.id && sheetSession === s.id) renderSheet(s)
+      }
       break
     }
   }
@@ -821,6 +847,105 @@ async function cancelSession(id) {
   try { await rpc('session.cancel', { sessionId: id }); toast('已发送停止 ■') } catch (e) { toast(e.message, true) }
 }
 
+/* ================= 会话设置面板（模型 / 权限） ================= */
+let sheetSession = null
+function openSheet(s) {
+  sheetSession = s.id
+  renderSheet(s)
+  $('#sheet-overlay').classList.add('open')
+  if (!s.models) {
+    rpc('session.models', { sessionId: s.id })
+      .then((v) => { s.models = v; if (sheetSession === s.id) renderSheet(s) })
+      .catch((e) => { s.models = { error: e.message }; if (sheetSession === s.id) renderSheet(s) })
+  }
+}
+function closeSheet() { sheetSession = null; $('#sheet-overlay').classList.remove('open') }
+
+async function applyModel(s, group, mod, effort) {
+  try {
+    const v = await rpc('session.selectModel', { sessionId: s.id, provider: group.id, model: mod.id, ...(effort ? { reasoningEffort: effort } : {}) })
+    if (s.models) s.models.current = v.selected
+    renderSheet(s)
+    vibrate(10)
+    toast('已切换：' + mod.name + (effort ? ' · ' + effort : ''))
+  } catch (e) { toast('切换失败：' + e.message, true) }
+}
+async function applyPermission(s, opt) {
+  try {
+    // 与桌面端一致：走 commands/execute 远程调用派发 /permission 斜杠命令
+    const v = await remote('commands/execute', { agentId: s.id, line: '/permission ' + opt.value })
+    vibrate(10)
+    if (!v) { toast('命令不可用', true); return }
+    if (v.result && v.result.kind !== 'success') { toast(v.result.text || '切换失败', true); return }
+    toast('权限已切换：' + opt.name)
+    // currentValue 由随后的 session/projection 帧刷新
+  } catch (e) { toast('切换失败：' + e.message, true) }
+}
+
+function renderSheet(s) {
+  const c = $('#sheet-content')
+  if (!c) return
+  c.textContent = ''
+  // ---- 模型 ----
+  c.appendChild(el('div', 'sheet-sec', '🧠 模型'))
+  const m = s.models
+  if (!m) c.appendChild(el('div', 'sheet-note', '加载中…'))
+  else if (m.error) c.appendChild(el('div', 'sheet-note', '加载失败：' + m.error))
+  else {
+    for (const g of m.groups || []) {
+      c.appendChild(el('div', 'sheet-group', g.name))
+      for (const mod of g.models || []) c.appendChild(modelRow(s, g, mod, m.current))
+    }
+    for (const f of m.failures || []) c.appendChild(el('div', 'sheet-note', '⚠️ ' + f.name + '：' + f.message))
+  }
+  // ---- 权限 ----
+  c.appendChild(el('div', 'sheet-sec', '🔒 权限'))
+  const perms = s.permissions
+  if (!perms) c.appendChild(el('div', 'sheet-note', '暂不可用（会话历史加载后显示）'))
+  else for (const opt of perms.options) c.appendChild(permRow(s, opt, perms.currentValue))
+}
+
+function modelRow(s, g, mod, current) {
+  const isCur = !!(current && current.provider === g.id && current.model === mod.id)
+  const efforts = mod.reasoning && Array.isArray(mod.reasoning.efforts) ? mod.reasoning.efforts : []
+  const row = el('div', 'sheet-row sheet-row-col' + (isCur ? ' sel' : ''))
+  const top = el('div', 'sheet-row-top')
+  const mid = el('div'); mid.style.minWidth = '0'; mid.style.flex = '1'
+  mid.appendChild(el('div', 'r-name', mod.name))
+  if (mod.description) mid.appendChild(el('div', 'r-desc', mod.description))
+  top.appendChild(mid)
+  if (isCur) top.appendChild(el('span', 'check', '✓'))
+  top.onclick = () => {
+    if (isCur) return
+    applyModel(s, g, mod, (mod.reasoning && mod.reasoning.defaultEffort) || undefined)
+  }
+  row.appendChild(top)
+  // 推理强度：仅当前模型且模型支持时显示
+  if (isCur && efforts.length) {
+    const chips = el('div', 'chip-row')
+    const curEffort = current.reasoningEffort || mod.reasoning.defaultEffort
+    for (const ef of efforts) {
+      const chip = el('span', 'chip' + (ef.id === curEffort ? ' sel' : ''), ef.name)
+      chip.title = ef.description || ''
+      chip.onclick = (e) => { e.stopPropagation(); if (ef.id !== curEffort) applyModel(s, g, mod, ef.id) }
+      chips.appendChild(chip)
+    }
+    row.appendChild(chips)
+  }
+  return row
+}
+function permRow(s, opt, currentValue) {
+  const isCur = opt.value === currentValue
+  const row = el('div', 'sheet-row' + (isCur ? ' sel' : ''))
+  const mid = el('div'); mid.style.minWidth = '0'; mid.style.flex = '1'
+  mid.appendChild(el('div', 'r-name', opt.name))
+  if (opt.description) mid.appendChild(el('div', 'r-desc', opt.description))
+  row.appendChild(mid)
+  if (isCur) row.appendChild(el('span', 'check', '✓'))
+  row.onclick = () => { if (!isCur) applyPermission(s, opt) }
+  return row
+}
+
 /* ================= Toast ================= */
 let toastTimer = null
 function toast(text, isErr) {
@@ -854,6 +979,7 @@ function buildShell() {
     <div class="navbar"><div class="bar">
       <button class="nav-btn back" id="chat-back">‹</button>
       <div class="title"><span id="chat-title"></span><div class="subtitle" id="chat-sub"></div></div>
+      <button class="nav-btn" id="chat-more">⋯</button>
     </div></div>
     <div class="chat-scroll" id="chat-scroll"></div>
     <div class="composer-wrap">
@@ -877,15 +1003,27 @@ function buildShell() {
       <button class="start-btn" id="start-btn">开始会话</button>
     </div>
   </div>
+  <div class="sheet-overlay" id="sheet-overlay">
+    <div class="sheet">
+      <div class="grabber"></div>
+      <div class="sheet-scroll" id="sheet-content"></div>
+    </div>
+  </div>
   <div class="toast" id="toast"></div>`
   $('#search').addEventListener('input', renderList)
   $('#chat-back').onclick = () => { location.hash = '#/' }
+  $('#chat-more').onclick = () => { if (S.current) openSheet(sess(S.current)) }
+  $('#sheet-overlay').addEventListener('click', (e) => { if (e.target.id === 'sheet-overlay') closeSheet() })
   $('#new-cancel').onclick = () => { location.hash = '#/' }
   $('#tab-new').onclick = () => { location.hash = '#/new' }
   $('#tab-todo').onclick = () => { location.hash = '#/' }
   $('#start-btn').onclick = startSession
   $('#stop-btn').onclick = () => S.current && cancelSession(S.current)
   const input = $('#chat-input')
+  input.addEventListener('focus', () => {
+    // 键盘弹起后把对话滚到底
+    setTimeout(() => { const sc = chatScrollEl(); if (sc) sc.scrollTop = sc.scrollHeight }, 250)
+  })
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && !/Mobi|Android/i.test(navigator.userAgent)) {
       e.preventDefault(); doSend()
@@ -903,6 +1041,17 @@ function buildShell() {
 
 /* ================= 启动 ================= */
 buildShell()
+/* 键盘适配：键盘弹起时 visualViewport 明显变矮，让 #app 跟随它，
+   输入框贴住键盘上沿（配合 CSS :focus-within 去掉 safe-area 底距）。 */
+if (window.visualViewport) {
+  const app = $('#app')
+  const applyVV = () => {
+    const vv = window.visualViewport
+    if (vv.height < window.innerHeight - 120) app.style.height = vv.height + 'px'
+    else app.style.height = ''
+  }
+  window.visualViewport.addEventListener('resize', applyVV)
+}
 window.addEventListener('hashchange', route)
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) return
