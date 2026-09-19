@@ -545,3 +545,42 @@ html.light .sheet { box-shadow:0 -12px 44px rgba(15,23,42,.18); }
 html.light .toast { background:rgba(15,23,42,.94); }
 html.light .copy-pill { background:rgba(15,23,42,.95); }
 html.light .conn-pill { background:#fff; }
+
+/* ============ 浅色主题补全（第二轮：逐项核对后的全覆盖） ============ */
+/* 提示条/复制 pill：改浅色卡片（用户反馈"成功 chip 还是黑的"） */
+html.light .toast {
+  background: var(--bg-elev); color: var(--text);
+  border-color: rgba(15,23,42,.14);
+  box-shadow: 0 10px 34px rgba(15,23,42,.22);
+}
+html.light .copy-pill {
+  background: var(--bg-elev); color: var(--text);
+  border-color: rgba(15,23,42,.14);
+  box-shadow: 0 8px 26px rgba(15,23,42,.2);
+}
+/* 弱对比文字蓝 #6aa6ff → 浅底下加深 */
+html.light .bubble a,
+html.light .badge.running,
+html.light .badge.running .b-dot,
+html.light .tool-ico,
+html.light .tool-state.run,
+html.light .m-meta .retry-send,
+html.light .running-bar,
+html.light .chip.sel,
+html.light .cmd-more,
+html.light .resume-label { color: #2563eb; }
+html.light .badge.running .b-dot { background: #2563eb; }
+/* 白底上消失的"白纱"元素 */
+html.light .badge.done { background: rgba(15,23,42,.07); }
+html.light .seg-btn:not(.sel):active { background: rgba(15,23,42,.06); }
+html.light .msg.user .bubble.pending { border-color: rgba(255,255,255,.65); }
+/* 代码块复制按钮 */
+html.light .code-copy { background: rgba(255,255,255,.94); color: var(--text-2); }
+html.light .code-copy:active { color: var(--text); }
+/* 搜索框在浅底上需要描边 */
+html.light .search { border: 1px solid var(--line); }
+/* 新消息 pill 阴影减淡 */
+html.light .new-msg-pill { box-shadow: 0 6px 20px rgba(15,23,42,.22); }
+/* todo/queue 卡虚线描边在浅底下加深 */
+html.light .queue-chip { border-color: rgba(15,23,42,.22); }
+/* 图片查看器保持深色（iOS 浅色 App 惯例），无需覆盖 */
