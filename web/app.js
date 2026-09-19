@@ -1,8 +1,12 @@
 /* DSH Mobile — phone-native surface.
  * Talks to the harness's own /api (same origin, same trust fence as the
- * desktop GUI): unary POST /api/<method>, respond POST /api/respond,
- * typert remotes POST /api/<ns>/<method>, live frames over the
- * /api/events.mux + /api/events.host WebSocket downlinks.
+ * desktop GUI), 0.1.2+ Typert gateway protocol:
+ *   - unary RPC: POST /api/<ns>/<method>, envelope {args:{request|_request|…}}
+ *   - one multiplexed WebSocket /api/remote.mux with logical streams:
+ *       session/control (queue/jobs/projection broadcasts, global)
+ *       session/follow  (per-session events + assistant streaming)
+ *       $events         (api-session/* notifications + approval/question
+ *                        waterfalls, answered via POST /api/$events/result)
  * Vanilla JS, no build step, no dependencies.
  */
 (function () {
@@ -23,6 +27,15 @@ const uuid = () => crypto.randomUUID ? crypto.randomUUID() :
   })
 const tz = () => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone } catch (e) { return undefined } }
 const vibrate = (ms) => { try { if (navigator.vibrate) navigator.vibrate(ms) } catch (e) {} }
+/* 复制文本：clipboard API 在非安全上下文（http over Tailscale）不可用，降级 execCommand */
+function copyText(t, done) {
+  if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(t).then(done, done); return }
+  const ta = document.createElement('textarea')
+  ta.value = t; ta.style.cssText = 'position:fixed;opacity:0;pointer-events:none'
+  document.body.appendChild(ta); ta.select()
+  try { document.execCommand('copy') } catch (e) {}
+  ta.remove(); done()
+}
 
 /* ---- 内联 SVG 图标（SF Symbols 风格线性字形；emoji 是"套壳感"来源） ---- */
 const SVG_OPEN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">'
@@ -47,6 +60,10 @@ const ICONS = {
   wrench: SVG_OPEN + '<path d="M14.7 6.3a4.5 4.5 0 0 0-6 6L3 18l3 3 5.7-5.7a4.5 4.5 0 0 0 6-6L14 13l-3-3 3.7-3.7z"/></svg>',
   sliders: SVG_OPEN + '<path d="M4 8h16M4 16h16"/><circle cx="9" cy="8" r="2.2"/><circle cx="15" cy="16" r="2.2"/></svg>',
   lock: SVG_OPEN + '<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>',
+  sun: SVG_OPEN + '<circle cx="12" cy="12" r="4"/><path d="M12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22M4.9 4.9l1.8 1.8M17.3 17.3l1.8 1.8M19.1 4.9l-1.8 1.8M6.7 17.3l-1.8 1.8"/></svg>',
+  moon: SVG_OPEN + '<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>',
+  copy: SVG_OPEN + '<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>',
+  brain: SVG_OPEN + '<path d="M9.5 3a2.5 2.5 0 0 0-2.5 2.5c0 .4.1.7.2 1A3.5 3.5 0 0 0 5 13.5a3.5 3.5 0 0 0 2.2 6.2A2.5 2.5 0 0 0 11 21V5.5A2.5 2.5 0 0 0 9.5 3z"/><path d="M14.5 3a2.5 2.5 0 0 1 2.5 2.5c0 .4-.1.7-.2 1a3.5 3.5 0 0 1 2.2 7A3.5 3.5 0 0 1 16.8 19.7 2.5 2.5 0 0 1 13 21V5.5A2.5 2.5 0 0 1 14.5 3z"/></svg>',
 }
 const icon = (name, size) => {
   const s = document.createElement('span')
@@ -61,17 +78,28 @@ const icon = (name, size) => {
 function fmtTime(ts) {
   if (!ts) return ''
   const d = new Date(ts), now = new Date()
-  const sameDay = d.toDateString() === now.toDateString()
   const hm = d.getHours() + ':' + String(d.getMinutes()).padStart(2, '0')
-  if (sameDay) return hm
-  return (d.getMonth() + 1) + '月' + d.getDate() + '日 ' + hm
+  if (d.toDateString() === now.toDateString()) return hm
+  const y = new Date(now); y.setDate(now.getDate() - 1)
+  if (d.toDateString() === y.toDateString()) return '昨天 ' + hm
+  const md = (d.getMonth() + 1) + '月' + d.getDate() + '日'
+  if (d.getFullYear() !== now.getFullYear()) return d.getFullYear() + '年' + md
+  return md + ' ' + hm
+}
+function dayLabel(ts) {
+  const d = new Date(ts), now = new Date()
+  if (d.toDateString() === now.toDateString()) return '今天'
+  const y = new Date(now); y.setDate(now.getDate() - 1)
+  if (d.toDateString() === y.toDateString()) return '昨天'
+  const md = (d.getMonth() + 1) + '月' + d.getDate() + '日'
+  return d.getFullYear() !== now.getFullYear() ? d.getFullYear() + '年' + md : md
 }
 
 /* 极简 markdown：代码块/行内码/粗体/斜体/链接/标题/列表/引用/表格降级 */
 function md(src) {
   const blocks = []
   let s = String(src).replace(/```(\w*)\n?([\s\S]*?)(```|$)/g, (m, lang, code) => {
-    blocks.push('<pre><code>' + esc(code.replace(/\n$/, '')) + '</code></pre>')
+    blocks.push('<div class="code-wrap"><button class="code-copy" type="button">复制</button><pre><code>' + esc(code.replace(/\n$/, '')) + '</code></pre></div>')
     return '' + (blocks.length - 1) + ''
   })
   s = esc(s)
@@ -110,50 +138,28 @@ function md(src) {
 }
 
 /* ================= API 层 ================= */
-async function rpc(method, payload, rpcId) {
-  const r = await fetch('/api/' + method, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ type: 'client-request', rpcId: rpcId || uuid(), method, payload }),
-  })
-  if (!r.ok) throw new Error(method + ': HTTP ' + r.status)
-  const full = await r.json()
-  if (!full.result || !full.result.ok) {
-    const err = full.result && full.result.error
-    throw new Error((err && err.message) || (method + ' failed'))
-  }
-  return full.result.value
-}
-async function respond(rpcId, value) {
-  const r = await fetch('/api/respond', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ type: 'client-response', rpcId, result: { ok: true, value } }),
-  })
-  const receipt = await r.json().catch(() => ({ accepted: false }))
-  return receipt.accepted === true
-}
-async function respondCancel(rpcId) {
-  await fetch('/api/respond', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ type: 'client-response', rpcId, result: { ok: false, error: { code: 'cancelled', message: 'cancelled from mobile', details: {} } } }),
-  }).catch(() => {})
-}
-/* Typert remote（网关拦截的 /api/<namespace>/<method>，如 commands/execute） */
-async function remote(endpoint, args) {
+/* 一元 RPC：POST /api/<ns>/<method>，payload 必须恰为 {args:{…}}（wire 名
+ * _request / request / 或 commands 的扁平字段），method 必须与端点一致。 */
+async function rpc(endpoint, args, rpcId) {
   const r = await fetch('/api/' + endpoint, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ type: 'client-request', rpcId: uuid(), method: endpoint, payload: { args } }),
+    body: JSON.stringify({ type: 'client-request', rpcId: rpcId || uuid(), method: endpoint, payload: { args: args || {} } }),
   })
-  if (!r.ok) throw new Error(endpoint + ': HTTP ' + r.status)
+  if (!r.ok) throw new Error(endpoint + ': HTTP ' + r.status + (r.status === 401 ? '（登录已过期：请重新打开带 token 的登录链接）' : r.status === 403 ? '（主机不在信任名单）' : ''))
   const full = await r.json()
   if (!full.result || !full.result.ok) {
     const err = full.result && full.result.error
     throw new Error((err && err.message) || (endpoint + ' failed'))
   }
   return full.result.value
+}
+/* $events waterfall 应答：审批/提问的决定通过一元 $events/result 回传。
+ * outcome: {kind:'result',value} | {kind:'rejected',error:{name,message}} | {kind:'next'} */
+async function answerWaterfall(eventId, outcome) {
+  if (!S.wfClient || !eventId) return false
+  try { await rpc('$events/result', { clientId: S.wfClient, eventId, outcome }); return true }
+  catch (e) { return false }
 }
 
 /* ================= 状态 ================= */
@@ -165,7 +171,9 @@ const S = {
   connState: 'connecting',  // connecting | online | offline
   current: null,            // open session id
   todoMode: false,          // 待办过滤
-  es: { mux: null, host: null },
+  listMode: (() => { try { return localStorage.getItem('dshm-list-mode') || 'time' } catch (e) { return 'time' } })(),  // 列表视图：time（按最近活跃平铺）| workspace（按工作区分组）
+  es: { mux: null },
+  wfClient: null,           // $events ready 帧下发的 clientId（waterfall 应答要用）
 }
 function sess(id) {
   let s = S.sessions.get(id)
@@ -173,16 +181,20 @@ function sess(id) {
     s = {
       id, title: null, running: false, blank: true, updatedAt: 0, cwd: '', agentPreset: null,
       loaded: false, hasMore: false, oldestSeq: null,
+      createdHere: false,              // 本机创建的会话：即使为空也在列表可见，避免「刚建的会话消失了」
+      subagent: false,                 // 子代理会话不在列表显示
       items: [],                       // folded chat items（含乐观上屏的 pending 项）
-      queue: [],                       // session/queue 帧（排队/插话中的消息）
+      queue: [],                       // control 流 queue 帧（排队/插话中的消息）
       live: null,                      // {turn, step, texts:{idx:text}}
-      approvals: new Map(),            // approvalId → {rpcId, toolName, callId, reason, outcome}
-      questions: new Map(),            // rpcId → {questions, outcome}
+      approvals: new Map(),            // eventId → {eventId, toolName, callId, reason, outcome}
+      questions: new Map(),            // eventId → {rpcId, questions, outcome}
       callArgs: new Map(),             // callId → {name, args}
       lastPreview: '',
       permissions: null,               // {options:[{value,name,description?}], currentValue}
-      models: null,                    // session.models 缓存
+      models: null,                    // session/modelCatalog 缓存
+      modelSel: null,                  // 当前模型选择 {provider,model,reasoningEffort}（modelSelection.next）
       imageLimits: null,               // imageLimits 投影
+      _resolveLoad: null,              // loadHistory 的快照到达回调
     }
     S.sessions.set(id, s)
   }
@@ -223,14 +235,20 @@ function attachImgEl(s, ref) {
   if (cached) { img.src = cached; return img }
   img.style.background = 'var(--bg-card-2)'
   img.style.minHeight = '80px'
-  rpc('session.attachment', { sessionId: s.id, attachmentId: ref.attachmentId })
+  rpc('session/attachment', { request: { sessionId: s.id, attachmentId: ref.attachmentId } })
     .then((v) => {
       const url = 'data:' + (v.attachment.mediaType || ref.mediaType) + ';base64,' + v.data
       attachCache.set(ref.attachmentId, url)
       img.src = url
       img.style.minHeight = ''
     })
-    .catch(() => { img.remove() })
+    .catch(() => {
+      // 失败不静默移除：留下可重试的占位，避免消息「少了一块」而用户无感知
+      const box = el('button', 'img-fail', '图片加载失败 · 点按重试')
+      box.type = 'button'
+      box.onclick = () => box.replaceWith(attachImgEl(s, ref))
+      img.replaceWith(box)
+    })
   return img
 }
 /* 读取+压缩（长边 1600 / 超限转 jpeg） */
@@ -378,6 +396,8 @@ function toolNode(item) {
   const card = el('div', 'tool-card')
   const head = el('div', 'tool-head')
   head.setAttribute('role', 'button')
+  head.setAttribute('tabindex', '0')
+  head.setAttribute('aria-expanded', 'false')
   const ico = el('div', 'tool-ico')
   ico.appendChild(icon(TOOL_ICONS[item.name] || 'wrench', 15))
   const mid = el('div'); mid.style.minWidth = '0'; mid.style.flex = '1'
@@ -394,12 +414,17 @@ function toolNode(item) {
   if (!detail) { try { detail = JSON.stringify(item.args, null, 2) } catch (e) {} }
   pre.textContent = detail.slice(0, 4000) || '(无输出)'
   body.appendChild(pre)
-  head.onclick = () => card.classList.toggle('open')
+  const toggle = () => { card.classList.toggle('open'); head.setAttribute('aria-expanded', card.classList.contains('open') ? 'true' : 'false') }
+  head.onclick = toggle
+  head.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle() } }
   card.append(head, body)
   return card
 }
 
 /* ================= 渲染：审批 / 提问 ================= */
+/* 高风险命令：允许前需要二次确认，避免误触放行 */
+const DANGER_RE = /(rm\s+-[a-z]*[rf]|\bsudo\b|\bmkfs\b|\bdd\s+if=|git\s+push\b[^\n]*--force|drop\s+table|truncate\s+table|chmod\s+-R\s+777|>\s*\/dev\/sd)/i
+
 function approvalNode(s, a) {
   const card = el('div', 'approval-card')
   const head = el('div', 'approval-head')
@@ -412,7 +437,20 @@ function approvalNode(s, a) {
   card.appendChild(head)
   const call = a.callId && s.callArgs.get(a.callId)
   const cmd = call ? (call.args.command || call.args.file_path || JSON.stringify(call.args)) : ''
-  if (cmd) card.appendChild(el('div', 'approval-cmd', String(cmd).slice(0, 600)))
+  if (cmd) {
+    const full = String(cmd)
+    const truncated = full.length > 600
+    const cmdEl = el('div', 'approval-cmd', truncated ? full.slice(0, 600) + '…' : full)
+    card.appendChild(cmdEl)
+    if (truncated) {
+      // 审批恰恰需要看全参数才能决策：截断处可展开
+      const more = el('button', 'cmd-more', '展开全文（' + full.length + ' 字符）')
+      more.type = 'button'
+      more.onclick = () => { cmdEl.textContent = full; more.remove() }
+      card.appendChild(more)
+    }
+    if (DANGER_RE.test(full)) a._danger = true
+  }
   if (a.reason) card.appendChild(el('div', 'approval-reason', a.reason))
   if (a.outcome) {
     const done = el('div', 'approval-done ' + (a.outcome === 'allowed-once' ? 'ok' : a.outcome === 'rejected' ? 'no' : 'mut'))
@@ -420,18 +458,29 @@ function approvalNode(s, a) {
     card.appendChild(done)
     return card
   }
+  if (a._danger) card.appendChild(el('div', 'approval-danger', '⚠️ 检测到高风险命令，「允许」需再点一次确认'))
   const btns = el('div', 'approval-btns')
   const deny = el('button', 'b-deny', '拒绝')
   const allow = el('button', 'b-allow', '允许一次')
   deny.onclick = async () => {
     a.outcome = 'rejected'; vibrate(12); rerenderApproval(s, a)
-    const ok = await respond(a.rpcId, { sessionId: s.id, approvalId: a.approvalId, outcome: 'rejected' }).catch(() => false)
+    const ok = await answerWaterfall(a.eventId || a.approvalId, { kind: 'result', value: 'rejected' })
     if (!ok) { toast('发送失败，请重试', true); a.outcome = null; rerenderApproval(s, a) }
     refreshBadges()
   }
+  let armed = false, armTimer = null
   allow.onclick = async () => {
+    if (a._danger && !armed) {
+      armed = true
+      allow.textContent = '再次点击确认允许'
+      allow.classList.add('armed')
+      vibrate([30, 40, 30])
+      armTimer = setTimeout(() => { armed = false; allow.textContent = '允许一次'; allow.classList.remove('armed') }, 3000)
+      return
+    }
+    clearTimeout(armTimer)
     a.outcome = 'allowed-once'; vibrate(12); rerenderApproval(s, a)
-    const ok = await respond(a.rpcId, { sessionId: s.id, approvalId: a.approvalId, outcome: 'allowed-once' }).catch(() => false)
+    const ok = await answerWaterfall(a.eventId || a.approvalId, { kind: 'result', value: 'allowed-once' })
     if (!ok) { toast('发送失败，请重试', true); a.outcome = null; rerenderApproval(s, a) }
     refreshBadges()
   }
@@ -458,6 +507,10 @@ function questionNode(s, q) {
   card.appendChild(head)
   if (q.outcome) {
     card.appendChild(el('div', 'ask-done', q.outcome === 'answered' ? '已回答 ✓' : '已取消'))
+    // 保留已提交的答案摘要，方便回溯「我当时答了什么」
+    if (q.outcome === 'answered' && Array.isArray(q.answerSummary)) {
+      for (const line of q.answerSummary) card.appendChild(el('div', 'ask-ans', line))
+    }
     return card
   }
   const answers = []
@@ -513,11 +566,16 @@ function questionNode(s, q) {
     const ok = answers.every((a) => a.selected.length > 0 || (a.custom && a.custom.trim()))
     submit.classList.toggle('on', ok)
   }
-  cancel.onclick = async () => { q.outcome = 'cancelled'; rerenderQuestion(s, q); await respondCancel(q.rpcId); refreshBadges() }
+  cancel.onclick = async () => { q.outcome = 'cancelled'; rerenderQuestion(s, q); await answerWaterfall(q.rpcId, { kind: 'rejected', error: { name: 'cancelled', message: 'cancelled from mobile' } }); refreshBadges() }
   submit.onclick = async () => {
     if (!submit.classList.contains('on')) return
+    q.answerSummary = answers.map((a) => {
+      const parts = a.selected.slice()
+      if (a.custom) parts.push(a.custom)
+      return parts.join('、')
+    }).filter(Boolean)
     q.outcome = 'answered'; vibrate(12); rerenderQuestion(s, q)
-    const ok = await respond(q.rpcId, { sessionId: s.id, answer: { answers } }).catch(() => false)
+    const ok = await answerWaterfall(q.rpcId, { kind: 'result', value: { answers } })
     if (!ok) { toast('发送失败，请重试', true); q.outcome = null; rerenderQuestion(s, q) }
     refreshBadges()
   }
@@ -534,6 +592,26 @@ function rerenderQuestion(s, q) {
 function chatScrollEl() { return $('#chat-scroll') }
 function nearBottom(sc) { return sc.scrollHeight - sc.scrollTop - sc.clientHeight < 120 }
 function scrollBottom(sc, force) { if (force || nearBottom(sc)) sc.scrollTop = sc.scrollHeight }
+
+/* 「↓ 新消息」悬浮提示：用户翻历史时新内容到达，不强行拉回，只给入口 */
+function showNewMsgPill() { const p = $('#new-msg-pill'); if (p) p.classList.add('show') }
+function hideNewMsgPill() { const p = $('#new-msg-pill'); if (p) p.classList.remove('show') }
+
+/* 图片查看器 */
+function openImageViewer(src) {
+  let ov = $('#img-viewer')
+  if (!ov) {
+    ov = el('div', 'img-viewer')
+    ov.id = 'img-viewer'
+    ov.onclick = () => ov.classList.remove('open')
+    document.body.appendChild(ov)
+  }
+  ov.textContent = ''
+  const im = el('img')
+  im.src = src; im.alt = '查看图片'
+  ov.appendChild(im)
+  ov.classList.add('open')
+}
 
 function skeletonNode() {
   const w = el('div', 'sk-wrap')
@@ -554,7 +632,14 @@ function renderChat(s, forceScroll) {
     more.onclick = () => loadEarlier(s)
     sc.appendChild(more)
   }
-  for (const item of s.items) sc.appendChild(itemNode(s, item))
+  let lastDay = ''
+  for (const item of s.items) {
+    if (item.time) {
+      const day = new Date(item.time).toDateString()
+      if (day !== lastDay) { lastDay = day; sc.appendChild(el('div', 'day-sep', dayLabel(item.time))) }
+    }
+    sc.appendChild(itemNode(s, item))
+  }
   renderChatPending(s, sc)
   refreshChatChrome(s)
   scrollBottom(sc, stick)
@@ -563,7 +648,12 @@ function renderChat(s, forceScroll) {
 const renderTimers = new Map()
 function scheduleRender(s) {
   if (renderTimers.has(s.id)) return
-  renderTimers.set(s.id, setTimeout(() => { renderTimers.delete(s.id); renderChat(s) }, 80))
+  renderTimers.set(s.id, setTimeout(() => {
+    renderTimers.delete(s.id)
+    renderChat(s)
+    const sc = chatScrollEl()
+    if (S.current === s.id && sc && !nearBottom(sc)) showNewMsgPill()
+  }, 80))
 }
 let listTimer = null
 function renderListSoon() {
@@ -576,6 +666,7 @@ function itemNode(s, item) {
       const m = el('div', 'msg user')
       const b = el('div', 'bubble' + (item.pending ? ' pending' : '') + (item.failed ? ' failed' : ''))
       if (item.text) b.appendChild(document.createTextNode(item.text))
+      b._copyText = item.text
       if (item.images) for (const img of item.images) {
         if (img.previewUrl) { const im = el('img', 'msg-img'); im.src = img.previewUrl; im.alt = img.name || '图片'; b.appendChild(im) }
         else if (img.attachmentId) b.appendChild(attachImgEl(s, img))
@@ -594,14 +685,11 @@ function itemNode(s, item) {
     }
     case 'assistant': {
       const m = el('div', 'msg bot')
+      // 思考过程：默认折叠、点按展开读全量（替代原来的"桌面端可见"提示行）
+      if (item.reasoning && item.reasoning.trim()) m.appendChild(reasoningNode(item.reasoning))
       const b = el('div', 'bubble')
       b.innerHTML = md(item.text)
-      if (item.reasoning) {
-        const r = el('div', null)
-        r.style.cssText = 'margin-top:8px;font-size:12.5px;color:var(--text-3)'
-        r.textContent = '🧠 含思考过程（桌面端可见）'
-        b.appendChild(r)
-      }
+      b._copyText = item.text
       m.appendChild(b)
       if (item.time) m.appendChild(el('div', 'm-meta', fmtTime(item.time)))
       return m
@@ -660,10 +748,26 @@ function renderLive(s, rebuild) {
     sc.appendChild(node)
   }
   const text = Object.keys(s.live.texts).sort((a, b) => a - b).map((k) => s.live.texts[k]).join('')
+  const thinking = s.live.reasoning && Object.keys(s.live.reasoning).length > 0 && !text
   const b = node.firstChild
-  b.textContent = text
+  b.textContent = (thinking ? '🧠 思考中… ' : '') + text
   b.appendChild(el('span', 'caret'))
   scrollBottom(sc)
+  if (!nearBottom(sc)) showNewMsgPill()  // 用户在翻历史：不打断阅读，提示有新内容
+}
+/* 思考过程折叠块（默认收起，点按展开读全量） */
+function reasoningNode(text) {
+  const box = el('div', 'reasoning')
+  const head = el('div', 'reasoning-head')
+  head.setAttribute('role', 'button')
+  head.appendChild(icon('brain', 14))
+  head.appendChild(el('span', null, '思考过程'))
+  const chev = el('span', 'tool-chev', '▶')
+  head.appendChild(chev)
+  const body = el('div', 'reasoning-body', text)
+  head.onclick = () => { box.classList.toggle('open'); vibrate(6) }
+  box.append(head, body)
+  return box
 }
 
 /* ================= 渲染：会话列表 ================= */
@@ -673,17 +777,25 @@ function statusBadge(s) {
   if (s.running) return ['running', '运行中']
   return ['done', '空闲']
 }
+/* 会话 → 工作区归属（sessionIds 精确匹配，cwd 兜底） */
+function findWs(s) {
+  return S.workspaces.find((w) => (w.sessionIds || []).includes(s.id))
+    || S.workspaces.find((w) => s.cwd && w.path && s.cwd.toLowerCase() === w.path.toLowerCase())
+    || null
+}
 function renderList() {
   const wrap = $('#session-list')
   if (!wrap) return
   wrap.textContent = ''
   const q = ($('#search').value || '').toLowerCase()
   let visible = [...S.sessions.values()]
-    .filter((s) => !s.blank || s.running || s.title)
+    .filter((s) => !s.blank || s.running || s.title || s.createdHere)
     .filter((s) => !s.subagent)
     .filter((s) => !S.archived.has(s.id))
     .filter((s) => !q || sessTitle(s).toLowerCase().includes(q) || (s.cwd || '').toLowerCase().includes(q))
     .sort((a, b) => b.updatedAt - a.updatedAt)
+  // 同步分段控件的选中态
+  document.querySelectorAll('.seg-btn').forEach((b) => b.classList.toggle('sel', b.dataset.mode === S.listMode))
   if (S.todoMode) {
     visible = visible.filter(hasPending)
     if (!visible.length) {
@@ -697,17 +809,28 @@ function renderList() {
     for (const s of visible) wrap.appendChild(sessionCard(s))
     return
   }
-  const byWs = new Map()
-  const ungrouped = []
-  for (const s of visible) {
-    const ws = S.workspaces.find((w) => (w.sessionIds || []).includes(s.id))
-      || S.workspaces.find((w) => s.cwd && w.path && s.cwd.toLowerCase() === w.path.toLowerCase())
-    if (ws) { if (!byWs.has(ws.workspaceId)) byWs.set(ws.workspaceId, []); byWs.get(ws.workspaceId).push(s) }
-    else ungrouped.push(s)
-  }
   if (!visible.length) {
     wrap.appendChild(el('div', 'empty-state', '还没有会话\n点下方「新会话」开始'))
     return
+  }
+  // 快速续聊：置顶「继续上次会话」（时间视图下第一张卡就是最近会话，无需重复）
+  if (!q && S.listMode !== 'time') {
+    let lastId = null
+    try { lastId = localStorage.getItem('dshm-last-open') } catch (e) {}
+    const last = lastId && visible.find((s) => s.id === lastId)
+    if (last) wrap.appendChild(resumeRow(last))
+  }
+  // 按时间视图：全部会话平铺、按最近活跃降序，卡片标注所属工作区
+  if (S.listMode === 'time') {
+    for (const s of visible) wrap.appendChild(sessionCard(s, true))
+    return
+  }
+  const byWs = new Map()
+  const ungrouped = []
+  for (const s of visible) {
+    const ws = findWs(s)
+    if (ws) { if (!byWs.has(ws.workspaceId)) byWs.set(ws.workspaceId, []); byWs.get(ws.workspaceId).push(s) }
+    else ungrouped.push(s)
   }
   const renderGroup = (name, iconName, list) => {
     const g = el('div', 'ws-group')
@@ -716,14 +839,34 @@ function renderList() {
     wrap.appendChild(g)
     for (const s of list) wrap.appendChild(sessionCard(s))
   }
-  for (const ws of S.workspaces) {
-    const list = byWs.get(ws.workspaceId)
-    if (list && list.length) renderGroup(ws.title || ws.path, 'folder', list)
-  }
+  // 工作区分组按「组内最近活跃」排序：有最新动静的工作区排最前
+  const wsSorted = S.workspaces
+    .map((ws) => ({ ws, list: byWs.get(ws.workspaceId) }))
+    .filter((x) => x.list && x.list.length)
+    .sort((a, b) => Math.max(...b.list.map((s) => s.updatedAt)) - Math.max(...a.list.map((s) => s.updatedAt)))
+  for (const { ws, list } of wsSorted) renderGroup(ws.title || ws.path, 'folder', list)
   if (ungrouped.length) renderGroup(S.workspaces.length ? '其他' : '会话', 'chat', ungrouped)
 }
-function sessionCard(s) {
+/* 置顶续聊卡：样式区别于普通会话卡，避免混淆 */
+function resumeRow(s) {
+  const row = el('div', 'resume-row')
+  row.setAttribute('role', 'button')
+  row.setAttribute('tabindex', '0')
+  const ico = el('div', 'resume-ico'); ico.appendChild(icon('bolt', 16))
+  const mid = el('div', 'resume-mid')
+  mid.appendChild(el('div', 'resume-label', '继续上次会话'))
+  mid.appendChild(el('div', 'resume-title', sessTitle(s)))
+  row.append(ico, mid)
+  row.appendChild(el('span', 'resume-time', fmtTime(s.updatedAt)))
+  const open = () => { location.hash = '#/s/' + s.id }
+  row.onclick = open
+  row.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open() } }
+  return row
+}
+function sessionCard(s, showWs) {
   const card = el('div', 'session-card')
+  card.setAttribute('role', 'button')
+  card.setAttribute('tabindex', '0')
   const row1 = el('div', 'row1')
   row1.appendChild(el('span', 's-title', sessTitle(s)))
   row1.appendChild(el('span', 's-time', fmtTime(s.updatedAt)))
@@ -737,8 +880,18 @@ function sessionCard(s) {
   b.appendChild(el('span', null, label))
   row3.appendChild(b)
   if (s.agentPreset) row3.appendChild(el('span', 's-meta', s.agentPreset))
+  // 时间视图：平铺无分组，卡片上标注所属工作区，保持上下文可辨
+  if (showWs) {
+    const ws = findWs(s)
+    if (ws) {
+      const name = ws.title || (ws.path || '').split('/').filter(Boolean).slice(-2).join('/')
+      row3.appendChild(el('span', 's-ws', name || '工作区'))
+    }
+  }
   card.appendChild(row3)
-  card.onclick = () => { location.hash = '#/s/' + s.id }
+  const open = () => { location.hash = '#/s/' + s.id }
+  card.onclick = open
+  card.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open() } }
   return card
 }
 function refreshBadges() {
@@ -748,29 +901,41 @@ function refreshBadges() {
 }
 
 /* ================= 数据加载 ================= */
+/* 新版没有 workspace.list：从 session/list 的 cwd 归并出工作区分组 */
+function deriveWorkspaces() {
+  const map = new Map()
+  for (const s of S.sessions.values()) {
+    if (s.subagent || !s.cwd) continue
+    if (!map.has(s.cwd)) map.set(s.cwd, [])
+    map.get(s.cwd).push(s.id)
+  }
+  S.workspaces = [...map.entries()].map(([path, ids]) => {
+    const parts = path.replace(/\/+$/, '').split('/').filter(Boolean)
+    return { workspaceId: path, path, title: parts[parts.length - 1] || path, sessionIds: ids }
+  })
+}
+function applyListValues(s, values) {
+  if (!values || typeof values !== 'object') return
+  if (typeof values.title === 'string' && values.title) s.title = values.title
+  if (values.permissions && Array.isArray(values.permissions.options)) s.permissions = values.permissions
+  if (values.imageLimits) s.imageLimits = values.imageLimits
+  if (values.modelSelection && values.modelSelection.next) s.modelSel = values.modelSelection.next
+}
 async function loadBase() {
   try {
-    const [ws, list] = await Promise.all([
-      rpc('workspace.list', {}).catch(() => ({ items: [], archivedSessionIds: [] })),
-      rpc('session.list', {}),
-    ])
-    S.workspaces = ws.items || []
-    S.archived = new Set(ws.archivedSessionIds || [])
+    const list = await rpc('session/list', { _request: {} })
     for (const item of list.items || []) {
-      if (item.origin === 'subagent') continue
       const s = sess(item.sessionId)
+      s.subagent = item.origin === 'subagent'
+      if (s.subagent) continue
       s.updatedAt = item.updatedAt || 0
       s.running = !!item.running
       s.blank = !!item.blank
       s.cwd = item.cwd || ''
       s.agentPreset = item.agentPreset || null
-      const values = item.projections && item.projections.values
-      if (values) {
-        if (typeof values.title === 'string' && values.title) s.title = values.title
-        if (values.permissions && Array.isArray(values.permissions.options)) s.permissions = values.permissions
-        if (values.imageLimits) s.imageLimits = values.imageLimits
-      }
+      applyListValues(s, item.projections && item.projections.values)
     }
+    deriveWorkspaces()
     setConn('online')
     renderList()
   } catch (e) {
@@ -778,34 +943,34 @@ async function loadBase() {
     toast('连接失败：' + e.message, true)
   }
 }
-async function loadHistory(s) {
-  const v = await rpc('session.history', { sessionId: s.id })
-  // 乐观上屏的 pending 项在重载后保留（真实事件到达时就地转正）
-  const pend = s.items.filter((i) => i.kind === 'user' && i.pending)
-  s.items = []
-  s.callArgs = new Map()
-  for (const entry of v.events || []) foldEvent(s, entry.event, entry.view)
-  for (const p of pend) if (!s.items.some((i) => i.rpcId === p.rpcId)) s.items.push(p)
-  s.hasMore = !!v.hasMore
-  s.oldestSeq = (v.events && v.events.length) ? v.events[0].event.seq : null
-  const values = v.projections && v.projections.values
-  if (values) {
-    if (typeof values.title === 'string' && values.title) s.title = values.title
-    if (values.permissions && Array.isArray(values.permissions.options)) s.permissions = values.permissions
-    if (values.imageLimits) s.imageLimits = values.imageLimits
-  }
-  s.loaded = true
+/* 历史加载：打开（或重开）follow 流，等首帧 snapshot 折叠完成 */
+function loadHistory(s) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { s._resolveLoad = null; reject(new Error('加载超时')) }, 12000)
+    s._resolveLoad = () => { clearTimeout(timer); resolve() }
+    if (!Mux.setFollow(s.id, true)) {
+      clearTimeout(timer); s._resolveLoad = null
+      reject(new Error('连接不可用，请稍后重试'))
+    }
+  })
 }
 async function loadEarlier(s) {
-  if (s.oldestSeq === null) return
-  const v = await rpc('session.history', { sessionId: s.id, beforeSeq: s.oldestSeq })
+  if (s.oldestSeq === null || s.oldestSeq <= 0) return
+  // 记录当前视口锚点：插入旧消息后按滚动高度差恢复，避免阅读位置跳变
+  const sc = chatScrollEl()
+  const prevGap = sc ? sc.scrollHeight - sc.scrollTop : 0
+  const v = await rpc('session/page', { request: { address: { kind: 'session', sessionId: s.id }, throughSeq: s.oldestSeq - 1, maxMessages: 40 } })
   const older = []
   const tmp = { items: older, callArgs: s.callArgs, live: null }
-  for (const entry of v.events || []) foldEvent(tmp, entry.event, entry.view)
+  for (const rec of v.records || []) foldEvent(tmp, rec.event || rec)
   s.items = older.concat(s.items)
   s.hasMore = !!v.hasMore
-  if (v.events && v.events.length) s.oldestSeq = v.events[0].event.seq
+  if (v.records && v.records.length) {
+    const first = v.records[0].event || v.records[0]
+    s.oldestSeq = typeof first.seq === 'number' ? first.seq : s.oldestSeq
+  }
   renderChat(s)
+  if (sc) sc.scrollTop = sc.scrollHeight - prevGap
   toast('已加载 ' + older.length + ' 条')
 }
 
@@ -815,133 +980,266 @@ function setConn(state) {
   const pill = $('#conn-pill')
   if (pill) {
     pill.classList.toggle('off', state !== 'online')
-    pill.querySelector('span:last-child').textContent = state === 'online' ? '已连接' : state === 'offline' ? '已断开' : '连接中…'
+    pill.querySelector('span:last-child').textContent = state === 'online' ? '已连接' : state === 'offline' ? '已断开 · 点按重连' : '连接中…'
   }
   if (S.current) refreshChatChrome(sess(S.current))
 }
-/* 一个带自动重连的下行 WS 流。重连时服务端会重放基线帧。 */
-function wsStream(key, path, onFrame, onOpen) {
-  let socket = null, closed = false, retry = 0, timer = null
-  const connect = () => {
-    if (closed) return
-    const url = new URL(path, location.origin)
+/* ================= 实时流（/api/remote.mux 单 WS 多路复用） ================= */
+/* 三条逻辑流：
+ *   session/control — 全局队列/jobs/投影广播（首帧 baseline）
+ *   session/follow  — 当前会话的事件 + 流式回复（首帧 snapshot）
+ *   $events         — api-session/* 通知 + 审批/提问 waterfall（首帧 ready 带 clientId） */
+const Mux = {
+  ws: null, retry: 0, timer: null, closed: false,
+  streams: new Map(),   // streamId → {kind, sessionId?}
+  followId: null,       // 当前 follow 的 sessionId
+  handlers: {},         // kind → (value, meta) => void
+  connect() {
+    if (this.closed) return
+    const url = new URL('/api/remote.mux', location.origin)
     url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
-    socket = new WebSocket(url)
-    S.es[key] = socket
-    socket.addEventListener('open', () => { retry = 0; if (onOpen) onOpen() })
-    socket.addEventListener('message', (ev) => {
+    const ws = new WebSocket(url)
+    this.ws = ws
+    S.es.mux = ws
+    ws.addEventListener('open', () => {
+      this.retry = 0
+      // 重连后各流重放基线帧：清掉待处理审批/提问（waterfall 只投递给当时在线的客户端）
+      for (const s of S.sessions.values()) { s.approvals.clear(); s.questions.clear() }
+      refreshBadges()
+      this.streams.clear()
+      this.openAll()
+    })
+    ws.addEventListener('message', (ev) => {
       if (typeof ev.data !== 'string') return
-      let full
-      try { full = JSON.parse(ev.data) } catch (e) { return }
-      if (!full || !full.payload) return
-      onFrame(full.rpcId, full.payload)
+      let m
+      try { m = JSON.parse(ev.data) } catch (e) { return }
+      if (!m || !m.streamId) return
+      const meta = this.streams.get(m.streamId)
+      if (!meta) return
+      if (m.type === 'item') {
+        const h = this.handlers[meta.kind]
+        if (h) { try { h(m.value, meta) } catch (e) { console.error('mux handler', e) } }
+      } else if (m.type === 'error') {
+        this.streams.delete(m.streamId)
+        if (meta.kind === 'follow' && meta.sessionId && S.current === meta.sessionId) {
+          const msg = m.error && m.error.message
+          if (msg) toast('会话流错误：' + msg, true)
+        }
+      } else if (m.type === 'end') {
+        this.streams.delete(m.streamId)
+      }
     })
-    socket.addEventListener('close', () => {
-      if (closed) return
+    ws.addEventListener('close', () => {
+      if (this.closed) return
       setConn('offline')
-      retry = Math.min(retry + 1, 5)
-      timer = setTimeout(connect, 1000 * retry)
+      this.retry = Math.min(this.retry + 1, 5)
+      this.timer = setTimeout(() => this.connect(), 1000 * this.retry)
     })
+  },
+  open(kind, endpoint, args, extra) {
+    if (!this.ws || this.ws.readyState !== 1) return null
+    const streamId = uuid()
+    this.streams.set(streamId, extra ? { kind, ...extra } : { kind })
+    this.ws.send(JSON.stringify({ type: 'open', streamId, endpoint, payload: { args } }))
+    return streamId
+  },
+  openAll() {
+    this.open('control', 'session/control', {})
+    this.open('events', '$events', {})
+    if (this.followId) this.open('follow', 'session/follow', { request: { address: { kind: 'session', sessionId: this.followId }, assistantStream: true } }, { sessionId: this.followId })
+  },
+  /* 切换/重开 follow 流；force=true 时即使目标相同也重开（重取 snapshot） */
+  setFollow(sessionId, force) {
+    const cur = [...this.streams.entries()].find(([, m]) => m.kind === 'follow')
+    if (!force && this.followId === sessionId && cur) return true
+    for (const [sid, meta] of [...this.streams]) {
+      if (meta.kind !== 'follow') continue
+      try { this.ws && this.ws.readyState === 1 && this.ws.send(JSON.stringify({ type: 'cancel', streamId: sid })) } catch (e) {}
+      this.streams.delete(sid)
+    }
+    this.followId = sessionId
+    if (!sessionId) return true
+    return !!this.open('follow', 'session/follow', { request: { address: { kind: 'session', sessionId }, assistantStream: true } }, { sessionId })
+  },
+  reconnect() {
+    if (this.ws && this.ws.readyState <= 1) return
+    clearTimeout(this.timer); this.retry = 0
+    try { this.ws && this.ws.close() } catch (e) {}
+    this.connect()
+  },
+}
+/* 投影统一落地（title/permissions/modelSelection/imageLimits） */
+function applyProjection(s, values) {
+  if (!values || typeof values !== 'object') return
+  if (typeof values.title === 'string' && values.title && s.title !== values.title) {
+    s.title = values.title
+    renderListSoon()
+    if (S.current === s.id) { const t = $('#chat-title'); if (t) t.textContent = sessTitle(s) }
   }
-  connect()
-  return {
-    reconnect: () => { if (!socket || socket.readyState > 1) { clearTimeout(timer); retry = 0; try { socket && socket.close() } catch (e) {} connect() } },
-    close: () => { closed = true; clearTimeout(timer); try { socket && socket.close() } catch (e) {} },
+  if (values.permissions && Array.isArray(values.permissions.options)) {
+    s.permissions = values.permissions
+    if (sheetSession === s.id) renderSheet(s)
+  }
+  if (values.modelSelection && values.modelSelection.next) {
+    s.modelSel = values.modelSelection.next
+    if (sheetSession === s.id && s.models) renderSheet(s)
+  }
+  if (values.imageLimits) s.imageLimits = values.imageLimits
+}
+/* ---- control 流：全局队列与投影 ---- */
+Mux.handlers.control = (v) => {
+  if (v.type === 'baseline') {
+    const b = v.value || v
+    const queues = b.queues || {}
+    for (const [sid, items] of Object.entries(queues)) {
+      const s = sess(sid)
+      s.queue = (items || []).filter((it) => it.placement !== 'context')
+      if (S.current === sid) scheduleRender(s)
+    }
+    const proj = b.projections || {}
+    for (const [sid, block] of Object.entries(proj)) {
+      applyProjection(sess(sid), block && block.values ? block.values : block)
+    }
+  } else if (v.type === 'queue') {
+    const s = sess(v.sessionId)
+    s.queue = (v.items || []).filter((it) => it.placement !== 'context')
+    if (S.current === s.id) scheduleRender(s)
+  } else if (v.type === 'projection') {
+    applyProjection(sess(v.sessionId), v.values || (v.block && v.block.values))
   }
 }
-let muxStream = null, hostStream = null
-function startMux() {
-  muxStream = wsStream('mux', '/api/events.mux', handleMux, () => {
-    // 重连后基线帧会自动重放：清空待处理，等待重放填充
-    for (const s of S.sessions.values()) { s.approvals.clear(); s.questions.clear() }
+/* ---- $events 流：通知 + 审批/提问 waterfall ---- */
+Mux.handlers.events = (v) => {
+  if (v.type === 'ready') {
+    S.wfClient = v.clientId
     setConn('online')
     loadBase()
     if (S.current) reloadCurrent()
-  })
-}
-function handleMux(rpcId, p) {
-  const s = p.sessionId ? sess(p.sessionId) : null
-  switch (p.type) {
-    case 'session/event': {
-      if (!s) return
-      s.updatedAt = Date.now()
-      if (s.loaded) {
-        const isChunk = p.event.type === 'assistant/chunk'
-        foldEvent(s, p.event, p.view)  // chunk 内部自行 renderLive（增量）
-        if (S.current === s.id && !isChunk) scheduleRender(s)
+    return
+  }
+  if (v.type === 'emit') {
+    const a = v.args || []
+    switch (v.event) {
+      case 'api-session/added': {
+        const sum = a[0] || {}
+        if (sum.origin === 'subagent') return
+        const s = sess(sum.sessionId)
+        s.subagent = false
+        s.blank = !!sum.blank; s.cwd = sum.cwd || ''; s.agentPreset = sum.agentPreset || null
+        s.updatedAt = sum.updatedAt || Date.now()
+        if (sum.projections && sum.projections.values) applyListValues(s, sum.projections.values)
+        deriveWorkspaces()
         renderListSoon()
+        break
       }
-      break
+      case 'api-session/removed': {
+        const id = a[0]
+        const wasCurrent = S.current === id
+        S.sessions.delete(id)
+        deriveWorkspaces()
+        renderList()
+        if (wasCurrent) {
+          // 正在看的会话被（其它端）删除：提示并退回列表，避免留下僵尸聊天页
+          toast('该会话已被删除', true)
+          location.hash = '#/'
+        }
+        break
+      }
+      case 'api-session/status': {
+        const s = sess(a[0]); s.running = !!a[1]
+        if (S.current === s.id) refreshChatChrome(s)
+        renderListSoon()
+        break
+      }
+      case 'api-session/activity': {
+        const s = sess(a[0]); s.updatedAt = a[1] || Date.now()
+        renderListSoon()
+        break
+      }
     }
-    case 'session/queue': {
-      if (!s) return
-      s.queue = (p.items || []).filter((it) => it.placement !== 'context')
-      if (S.current === s.id) scheduleRender(s)
-      break
-    }
-    case 'approval/requested': {
-      if (!s) return
-      s.approvals.set(p.approvalId, { rpcId, approvalId: p.approvalId, toolName: p.toolName, callId: p.callId, reason: p.reason, outcome: null })
+    return
+  }
+  if (v.type === 'waterfall') {
+    if (v.event === 'approval/request') {
+      const req = v.request || {}
+      const s = sess(v.agentId)
+      s.approvals.set(v.eventId, { eventId: v.eventId, approvalId: v.eventId, rpcId: v.eventId, toolName: req.toolName || '工具', callId: req.callId, reason: req.reason, outcome: null })
       vibrate([80, 60, 80])
-      toast('⚠️ ' + p.toolName + ' 等待审批 — 点按查看', { sessionId: s.id })
+      toast('⚠️ ' + (req.toolName || '工具') + ' 等待审批 — 点按查看', { sessionId: s.id })
       if (S.current === s.id) renderChat(s, true)
       refreshBadges(); renderList()
-      break
-    }
-    case 'approval/resolved': {
-      if (!s) return
-      const a = s.approvals.get(p.approvalId)
-      if (a && !a.outcome) { a.outcome = p.outcome; if (S.current === s.id) rerenderApproval(s, a) }
-      refreshBadges(); renderList()
-      break
-    }
-    case 'question/requested': {
-      if (!s) return
-      s.questions.set(rpcId, { rpcId, questions: p.questions, outcome: null })
+    } else if (v.event === 'user-questions/request') {
+      const req = v.request || {}
+      const s = sess(v.agentId)
+      s.questions.set(v.eventId, { rpcId: v.eventId, questions: req.questions || [], outcome: null })
       vibrate([80, 60, 80])
       toast('🤔 Agent 有一个问题 — 点按查看', { sessionId: s.id })
       if (S.current === s.id) renderChat(s, true)
       refreshBadges(); renderList()
-      break
     }
-    case 'question/resolved': {
-      if (!s) return
-      const q = s.questions.get(p.questionRpcId)
-      if (q && !q.outcome) { q.outcome = p.outcome; if (S.current === s.id) rerenderQuestion(s, q) }
-      refreshBadges(); renderList()
-      break
+    return
+  }
+  if (v.type === 'cancel') {
+    // Host 端已了结该 waterfall（其它端已答复 / 已取消）：本地卡片转为已处理
+    for (const s of S.sessions.values()) {
+      const ap = s.approvals.get(v.eventId)
+      if (ap && !ap.outcome) { ap.outcome = 'decided-elsewhere'; if (S.current === s.id) rerenderApproval(s, ap) }
+      const q = s.questions.get(v.eventId)
+      if (q && !q.outcome) { q.outcome = 'cancelled'; if (S.current === s.id) rerenderQuestion(s, q) }
     }
-    case 'session/projection': {
-      if (s && p.key === 'title' && typeof p.value === 'string' && p.value) {
-        s.title = p.value
-        renderList()
-        if (S.current === s.id) $('#chat-title').textContent = sessTitle(s)
-      }
-      if (s && p.key === 'permissions' && p.value && Array.isArray(p.value.options)) {
-        s.permissions = p.value
-        if (S.current === s.id && sheetSession === s.id) renderSheet(s)
-      }
-      break
-    }
+    refreshBadges(); renderList()
   }
 }
-function startHostStream() {
-  hostStream = wsStream('host', '/api/events.host', (rpcId, p) => {
-    if (!p || !p.type) return
-    switch (p.type) {
-      case 'host/session-added': {
-        if (p.origin === 'subagent') return
-        const s = sess(p.sessionId)
-        s.blank = p.blank; s.cwd = p.cwd || ''; s.agentPreset = p.agentPreset || null; s.updatedAt = Date.now()
-        renderList()
-        break
-      }
-      case 'host/session-removed': S.sessions.delete(p.sessionId); renderList(); break
-      case 'host/session-status': { const s = sess(p.sessionId); s.running = !!p.running; if (S.current === s.id) refreshChatChrome(s); renderList(); break }
-      case 'host/workspace-changed': case 'host/workspace-removed': case 'host/workspace-order-changed': case 'host/archived-sessions-changed':
-        loadBase(); break
+/* ---- follow 流：当前会话的事件 + 流式回复 ---- */
+Mux.handlers.follow = (v, meta) => {
+  const s = sess(meta.sessionId)
+  if (v.type === 'snapshot') {
+    // 与旧 loadHistory 相同的重建逻辑；重连/重开流时同样走这里
+    const pend = s.items.filter((i) => i.kind === 'user' && i.pending)
+    s.items = []
+    s.callArgs = new Map()
+    const records = v.records || []
+    for (const rec of records) foldEvent(s, rec.event || rec)
+    for (const p of pend) if (!s.items.some((i) => i.rpcId === p.rpcId)) s.items.push(p)
+    s.hasMore = !!v.hasMore
+    s.oldestSeq = records.length ? (records[0].event || records[0]).seq : null
+    applyProjection(s, v.projections && v.projections.values)
+    s.loaded = true
+    if (S.current === s.id) renderChat(s, true)
+    renderListSoon()
+    if (s._resolveLoad) { const r = s._resolveLoad; s._resolveLoad = null; r() }
+  } else if (v.type === 'event') {
+    s.updatedAt = Date.now()
+    if (s.loaded) {
+      foldEvent(s, v.event)
+      if (S.current === s.id) scheduleRender(s)
+      renderListSoon()
     }
-  }, null)
+  } else if (v.type === 'assistant-stream') {
+    if (!s.loaded) return
+    const f = v.frame || {}
+    if (f.type === 'start') {
+      if (s.live) endLive(s, null, null)
+      s.live = { turn: f.turn, step: f.step, texts: {}, reasoning: {} }
+    } else if (f.type === 'chunk') {
+      const c = f.chunk || {}
+      if (c.type === 'text-delta' && typeof c.text === 'string') {
+        if (!s.live) s.live = { turn: null, step: null, texts: {}, reasoning: {} }
+        s.live.texts[c.index] = (s.live.texts[c.index] || '') + c.text
+        renderLive(s)
+      } else if ((c.type === 'reasoning-delta' || c.type === 'thinking-delta') && typeof c.text === 'string') {
+        // 思考流：正文还没来时显示"思考中"，修"有的思考看不到"
+        if (!s.live) s.live = { turn: null, step: null, texts: {}, reasoning: {} }
+        if (!s.live.reasoning) s.live.reasoning = {}
+        s.live.reasoning[c.index] = (s.live.reasoning[c.index] || '') + c.text
+        renderLive(s)
+      } else if (c.type === 'block-end' && s.live && c.index !== undefined) {
+        delete s.live.texts[c.index]
+        if (s.live.reasoning) delete s.live.reasoning[c.index]
+      }
+    }
+    // 'end'：无需处理，随后的 assistant/message 事件会 settle 气泡
+  }
 }
 
 /* ================= 视图 / 路由（chat 覆盖层 + push 转场） ================= */
@@ -984,13 +1282,26 @@ function updateTabs() {
       (tab === 'todo' && S.todoMode && h === '#/') ||
       (tab === 'new' && h === '#/new'))
   })
+  const seg = $('#list-seg')
+  if (seg) seg.style.display = (h === '#/') && !S.todoMode ? 'flex' : 'none'
 }
+/* 输入草稿：按会话持久化，切走/被杀后台不丢 */
+const draftKey = (id) => 'dshm-draft:' + id
+function restoreDraft(id) {
+  const input = $('#chat-input')
+  if (!input) return
+  try { input.textContent = localStorage.getItem(draftKey(id)) || '' } catch (e) { input.textContent = '' }
+}
+function clearDraft(id) { try { localStorage.removeItem(draftKey(id)) } catch (e) {} }
+
 async function openSession(id, force) {
   const s = sess(id)
   S.current = id
   S.todoMode = false
+  try { localStorage.setItem('dshm-last-open', id) } catch (e) {}  // 供列表页「继续上次会话」
   $('#chat-title').textContent = sessTitle(s)
   showView('chat')
+  hideNewMsgPill()
   const sc = chatScrollEl()
   sc.textContent = ''
   if (!s.loaded || force) {
@@ -1005,9 +1316,13 @@ async function openSession(id, force) {
       sc.appendChild(d)
       return
     }
+  } else {
+    // 已有内容：把 follow 流切到本会话（后台继续接收事件）
+    Mux.setFollow(id)
   }
   renderChat(s, true)
   refreshChatChrome(s)
+  restoreDraft(id)
 }
 function reloadCurrent() {
   // 重连后的强制刷新：保留在 chat 视图（不重复进入动画）
@@ -1115,10 +1430,7 @@ let newPreset = null
 async function renderNew() {
   const wrap = $('#new-ws-list')
   wrap.textContent = ''
-  if (!S.workspaces.length) {
-    const v = await rpc('workspace.list', {}).catch(() => ({ items: [] }))
-    S.workspaces = v.items || []
-  }
+  if (!S.workspaces.length) await loadBase().catch(() => {})  // 工作区由 session/list 归并而来
   if (!S.workspaces.length) { wrap.appendChild(el('div', 'empty-state', '没有工作区。先在桌面端创建一个。')); return }
   if (!newSel || !S.workspaces.find((w) => w.workspaceId === newSel)) newSel = S.workspaces[0].workspaceId
   for (const w of S.workspaces) {
@@ -1138,7 +1450,7 @@ async function renderNew() {
   prow.textContent = ''
   if (!S.presets) {
     prow.appendChild(el('span', 'sheet-note', '加载预设…'))
-    rpc('agentPreset.list', {})
+    rpc('agentPresets/list', {})
       .then((v) => {
         S.presets = (v.presets || []).map((p) => ({ id: p.id, name: p.name || p.id, isDefault: !!p.isDefault }))
         if (location.hash === '#/new') renderNew()
@@ -1162,9 +1474,10 @@ async function startSession() {
   const btn = $('#start-btn')
   btn.disabled = true; btn.textContent = '创建中…'
   try {
-    const v = await rpc('session.create', { workspaceId: newSel, ...(newPreset ? { agentPreset: newPreset } : {}) })
+    const v = await rpc('session/create', { request: { cwd: newSel, ...(newPreset ? { agentPreset: newPreset } : {}) } })
     const s = sess(v.sessionId)
     s.blank = !text
+    s.createdHere = true  // 本机创建：即使为空也保留在列表里
     s.updatedAt = Date.now()
     const ws = S.workspaces.find((w) => w.workspaceId === newSel)
     if (ws) s.cwd = ws.path
@@ -1194,8 +1507,19 @@ async function sendPrompt(id, text, images) {
   if (text) content.push({ type: 'text', text })
   for (const im of images || []) content.push({ type: 'image', mediaType: im.mediaType, data: im.data, name: im.name })
   try {
-    const mode = s.running ? 'steer' : 'queue'
-    await rpc('session.prompt', { sessionId: id, mode, content, clientTimeZone: tz() }, rpcId)
+    // 运行中优先 steer（插话）；宿主判定不可 steer 时自动降级排队——
+    // 修「只能排队」：running 状态过期不该让用户的消息卡住
+    if (s.running) {
+      try {
+        await rpc('session/prompt', { request: { requestId: rpcId, sessionId: id, mode: 'steer', content, clientTimeZone: tz() } })
+      } catch (e) {
+        if (e.message && /steer/i.test(e.message)) {
+          await rpc('session/prompt', { request: { requestId: rpcId, sessionId: id, mode: 'queue', content, clientTimeZone: tz() } })
+        } else throw e
+      }
+    } else {
+      await rpc('session/prompt', { request: { requestId: rpcId, sessionId: id, mode: 'queue', content, clientTimeZone: tz() } })
+    }
     // 服务器已受理；保持 pending 样式直到 user/message 事件（进入会话）就地转正
   } catch (e) {
     item.pending = false; item.failed = true
@@ -1209,27 +1533,28 @@ function retrySend(s, item) {
   sendPrompt(s.id, item.text, item.images)
 }
 async function cancelSession(id) {
-  try { await rpc('session.cancel', { sessionId: id }); toast('已发送停止 ■') } catch (e) { toast(e.message, true) }
+  try { await rpc('session/cancel', { request: { sessionId: id } }); toast('已发送停止 ■') } catch (e) { toast(e.message, true) }
 }
 
 /* ================= 会话设置面板（模型 / 权限） ================= */
 let sheetSession = null
+function loadModels(s) {
+  rpc('session/modelCatalog', {})
+    .then((v) => { s.models = v; if (sheetSession === s.id) renderSheet(s) })
+    .catch((e) => { s.models = { error: e.message }; if (sheetSession === s.id) renderSheet(s) })
+}
 function openSheet(s) {
   sheetSession = s.id
   renderSheet(s)
   $('#sheet-overlay').classList.add('open')
-  if (!s.models) {
-    rpc('session.models', { sessionId: s.id })
-      .then((v) => { s.models = v; if (sheetSession === s.id) renderSheet(s) })
-      .catch((e) => { s.models = { error: e.message }; if (sheetSession === s.id) renderSheet(s) })
-  }
+  if (!s.models) loadModels(s)
 }
 function closeSheet() { sheetSession = null; $('#sheet-overlay').classList.remove('open') }
 
 async function applyModel(s, group, mod, effort) {
   try {
-    const v = await rpc('session.selectModel', { sessionId: s.id, provider: group.id, model: mod.id, ...(effort ? { reasoningEffort: effort } : {}) })
-    if (s.models) s.models.current = v.selected
+    const v = await rpc('session/selectModel', { request: { sessionId: s.id, provider: group.id, model: mod.id, ...(effort ? { reasoningEffort: effort } : {}) } })
+    if (v && v.selected) s.modelSel = v.selected
     renderSheet(s)
     vibrate(10)
     toast('已切换：' + mod.name + (effort ? ' · ' + effort : ''))
@@ -1238,29 +1563,45 @@ async function applyModel(s, group, mod, effort) {
 async function applyPermission(s, opt) {
   try {
     // 与桌面端一致：走 commands/execute 远程调用派发 /permission 斜杠命令
-    const v = await remote('commands/execute', { agentId: s.id, line: '/permission ' + opt.value })
+    const v = await rpc('commands/execute', { agentId: s.id, line: '/permission ' + opt.value, submittedAttachments: [] })
     vibrate(10)
     if (!v) { toast('命令不可用', true); return }
     if (v.result && v.result.kind !== 'success') { toast(v.result.text || '切换失败', true); return }
+    // 修「提示成功但界面没动」：control 流不一定广播该投影，先乐观更新 ✓，
+    // 再用 session/list（唯一事实源）对齐真实值
+    if (s.permissions) { s.permissions = { ...s.permissions, currentValue: opt.value }; renderSheet(s) }
     toast('权限已切换：' + opt.name)
-    // currentValue 由随后的 session/projection 帧刷新
+    loadBaseSoon()
   } catch (e) { toast('切换失败：' + e.message, true) }
+}
+let baseSoonTimer = null
+function loadBaseSoon() {
+  if (baseSoonTimer) return
+  baseSoonTimer = setTimeout(() => { baseSoonTimer = null; loadBase() }, 500)
 }
 
 function renderSheet(s) {
   const c = $('#sheet-content')
   if (!c) return
   c.textContent = ''
+  c.appendChild(el('div', 'sheet-title', sessTitle(s)))
   // ---- 模型 ----
   const mSec = el('div', 'sheet-sec'); mSec.appendChild(icon('sliders', 14)); mSec.appendChild(el('span', null, '模型'))
   c.appendChild(mSec)
   const m = s.models
   if (!m) c.appendChild(el('div', 'sheet-note', '加载中…'))
-  else if (m.error) c.appendChild(el('div', 'sheet-note', '加载失败：' + m.error))
-  else {
+  else if (m.error) {
+    const note = el('div', 'sheet-note', '加载失败：' + m.error)
+    const retry = el('button', 'sheet-retry', '重试')
+    retry.type = 'button'
+    retry.onclick = () => { s.models = null; renderSheet(s); loadModels(s) }
+    note.appendChild(retry)
+    c.appendChild(note)
+  } else {
+    const cur = s.modelSel || m.default
     for (const g of m.groups || []) {
       c.appendChild(el('div', 'sheet-group', g.name))
-      for (const mod of g.models || []) c.appendChild(modelRow(s, g, mod, m.current))
+      for (const mod of g.models || []) c.appendChild(modelRow(s, g, mod, cur))
     }
     for (const f of m.failures || []) c.appendChild(el('div', 'sheet-note', '⚠️ ' + f.name + '：' + f.message))
   }
@@ -1270,6 +1611,31 @@ function renderSheet(s) {
   const perms = s.permissions
   if (!perms) c.appendChild(el('div', 'sheet-note', '暂不可用（会话历史加载后显示）'))
   else for (const opt of perms.options) c.appendChild(permRow(s, opt, perms.currentValue))
+  // ---- 操作 ----
+  const aSec = el('div', 'sheet-sec'); aSec.appendChild(icon('copy', 14)); aSec.appendChild(el('span', null, '操作'))
+  c.appendChild(aSec)
+  const copyRow = el('div', 'sheet-row')
+  const cm = el('div'); cm.style.minWidth = '0'; cm.style.flex = '1'
+  cm.appendChild(el('div', 'r-name', '复制全部对话'))
+  cm.appendChild(el('div', 'r-desc', '导出为纯文本，粘贴到任何地方'))
+  copyRow.appendChild(cm)
+  copyRow.onclick = () => {
+    copyText(sessionText(s), () => {})
+    vibrate(10)
+    toast('已复制 ' + s.items.filter((i) => i.kind === 'user' || i.kind === 'assistant').length + ' 条消息')
+  }
+  c.appendChild(copyRow)
+}
+/* 整段对话导出为纯文本 */
+function sessionText(s) {
+  const lines = []
+  for (const it of s.items) {
+    if (it.kind === 'user') lines.push('我：' + it.text)
+    else if (it.kind === 'assistant') lines.push(it.text)
+    else if (it.kind === 'tool') lines.push('[工具 ' + it.name + '] ' + toolSummary(it))
+    else if (it.kind === 'sys') lines.push(it.text)
+  }
+  return lines.filter(Boolean).join('\n\n')
 }
 
 function modelRow(s, g, mod, current) {
@@ -1354,17 +1720,90 @@ function initPtr(sc) {
   })
 }
 
+/* ================= 深浅色主题 ================= */
+function initTheme() {
+  let saved = null
+  try { saved = localStorage.getItem('dsh-mobile-theme') } catch (e) {}
+  applyTheme(saved === 'light' || saved === 'dark' ? saved : (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark'))
+}
+function applyTheme(t) {
+  document.documentElement.classList.toggle('light', t === 'light')
+  document.documentElement.style.colorScheme = t
+  const meta = document.querySelector('meta[name="theme-color"]')
+  if (meta) meta.content = t === 'light' ? '#f5f6f8' : '#0b0e14'
+  const sb = document.querySelector('meta[name="apple-mobile-web-app-status-bar-style"]')
+  if (sb) sb.content = t === 'light' ? 'default' : 'black-translucent'
+  const btn = $('#theme-toggle')
+  if (btn) {
+    btn.textContent = ''
+    btn.appendChild(icon(t === 'light' ? 'moon' : 'sun', 20))
+    btn.setAttribute('aria-label', t === 'light' ? '切换为深色' : '切换为浅色')
+  }
+}
+function toggleTheme() {
+  const next = document.documentElement.classList.contains('light') ? 'dark' : 'light'
+  try { localStorage.setItem('dsh-mobile-theme', next) } catch (e) {}
+  applyTheme(next)
+}
+
+/* ================= 长按复制气泡 ================= */
+let copyPill = null
+function dismissCopyPill() { if (copyPill) { copyPill.remove(); copyPill = null } }
+function showCopyPill(x, y, text) {
+  dismissCopyPill()
+  const pill = el('button', 'copy-pill')
+  pill.type = 'button'
+  pill.appendChild(icon('copy', 15))
+  pill.appendChild(el('span', null, '复制'))
+  document.body.appendChild(pill)
+  const w = pill.offsetWidth
+  pill.style.left = Math.max(10, Math.min(x - w / 2, window.innerWidth - w - 10)) + 'px'
+  pill.style.top = Math.max(10, y - 54) + 'px'
+  pill.onclick = () => {
+    copyText(text, () => {})
+    dismissCopyPill()
+    toast('已复制 ✓')
+  }
+  copyPill = pill
+  vibrate(10)
+}
+function initLongPressCopy(sc) {
+  if (!sc) return
+  let timer = null, tx = 0, ty = 0, target = null
+  sc.addEventListener('touchstart', (e) => {
+    const b = e.target.closest && e.target.closest('.msg .bubble')
+    dismissCopyPill()
+    if (!b) return
+    target = b; tx = e.touches[0].clientX; ty = e.touches[0].clientY
+    clearTimeout(timer)
+    timer = setTimeout(() => {
+      const text = target._copyText || target.textContent
+      if (text && text.trim()) showCopyPill(tx, ty, text)
+    }, 460)
+  }, { passive: true })
+  const cancel = () => clearTimeout(timer)
+  sc.addEventListener('touchend', cancel)
+  sc.addEventListener('touchmove', cancel)
+  sc.addEventListener('touchcancel', cancel)
+  document.addEventListener('touchstart', (e) => { if (copyPill && !(e.target.closest && e.target.closest('.copy-pill'))) dismissCopyPill() }, { passive: true })
+}
+
 /* ================= 骨架 ================= */
 function buildShell() {
   $('#app').innerHTML = `
   <div class="view" id="view-list">
     <div class="navbar"><div class="bar">
       <div class="big-title">会话</div>
-      <span class="conn-pill" id="conn-pill"><span class="dot"></span><span>连接中…</span></span>
+      <button class="nav-btn" id="theme-toggle" type="button" aria-label="切换深浅色主题"></button>
+      <span class="conn-pill" id="conn-pill" role="button" tabindex="0" aria-label="连接状态，断线时点按重连"><span class="dot"></span><span>连接中…</span></span>
     </div></div>
     <div class="scroll" id="list-scroll">
       <div class="ptr" id="ptr"></div>
       <div class="search-wrap"><input class="search" id="search" placeholder="搜索会话" autocapitalize="off" autocorrect="off" spellcheck="false" aria-label="搜索会话"></div>
+      <div class="list-seg" id="list-seg" role="tablist" aria-label="列表排序方式">
+        <button class="seg-btn" data-mode="time" type="button" role="tab">最近活跃</button>
+        <button class="seg-btn" data-mode="workspace" type="button" role="tab">按工作区</button>
+      </div>
       <div id="session-list"></div>
     </div>
     <div class="tabbar">
@@ -1390,6 +1829,7 @@ function buildShell() {
         <button class="send" id="send-btn" aria-label="发送"><span class="ic-slot" data-ic="send"></span></button>
       </div>
     </div>
+    <button class="new-msg-pill" id="new-msg-pill" type="button">↓ 新消息</button>
   </div>
   <div class="view" id="view-new">
     <div class="navbar"><div class="bar">
@@ -1423,6 +1863,15 @@ function buildShell() {
   gh('#preset-group-h', 'robot', 'Agent 预设')
   gh('#new-input-h', 'chat', '说点什么开始（可留空）')
   $('#search').addEventListener('input', renderList)
+  // 列表视图切换：最近活跃平铺 / 按工作区分组
+  document.querySelectorAll('.seg-btn').forEach((b) => {
+    b.onclick = () => {
+      if (S.listMode === b.dataset.mode) return
+      S.listMode = b.dataset.mode
+      try { localStorage.setItem('dshm-list-mode', S.listMode) } catch (e) {}
+      renderList()
+    }
+  })
   $('#chat-back').onclick = () => { location.hash = '#/' }
   $('#chat-more').onclick = () => { if (S.current) openSheet(sess(S.current)) }
   $('#sheet-overlay').addEventListener('click', (e) => { if (e.target.id === 'sheet-overlay') closeSheet() })
@@ -1435,6 +1884,43 @@ function buildShell() {
   initPtr($('#list-scroll'))
   initSwipeBack()
   initSheetDrag()
+  initLongPressCopy($('#chat-scroll'))
+  // 深浅色主题：初始化 + 切换（localStorage 持久化，不跟随系统以免覆盖用户选择）
+  initTheme()
+  $('#theme-toggle').onclick = () => { toggleTheme(); vibrate(8) }
+  // 连接状态：断线时可点按手动重连（不必等 15s 轮询）
+  const connPill = $('#conn-pill')
+  const manualReconnect = () => {
+    if (S.connState === 'online') return
+    toast('正在重连…')
+    Mux.reconnect()
+    loadBase()
+  }
+  connPill.onclick = manualReconnect
+  connPill.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); manualReconnect() } }
+  // 「↓ 新消息」pill：点按回到底部
+  $('#new-msg-pill').onclick = () => {
+    const sc = chatScrollEl()
+    if (sc) sc.scrollTop = sc.scrollHeight
+    hideNewMsgPill()
+  }
+  // 滚回底部时自动隐藏 pill
+  $('#chat-scroll').addEventListener('scroll', () => {
+    const sc = chatScrollEl()
+    if (sc && nearBottom(sc)) hideNewMsgPill()
+  }, { passive: true })
+  // 聊天区点击委派：代码块复制 / 图片放大
+  $('#chat-scroll').addEventListener('click', (e) => {
+    const cp = e.target.closest && e.target.closest('.code-copy')
+    if (cp) {
+      const pre = cp.parentElement && cp.parentElement.querySelector('pre')
+      const t = pre ? pre.textContent : ''
+      copyText(t, () => { cp.textContent = '已复制 ✓'; setTimeout(() => { cp.textContent = '复制' }, 1200) })
+      return
+    }
+    const im = e.target.closest && e.target.closest('.msg-img')
+    if (im && im.src) openImageViewer(im.src)
+  })
   // 图片附件
   let pendingImages = []
   const strip = $('#attach-strip')
@@ -1451,10 +1937,7 @@ function buildShell() {
       strip.appendChild(th)
     })
   }
-  $('#attach-btn').onclick = () => $('#attach-input').click()
-  $('#attach-input').addEventListener('change', async (e) => {
-    const files = [...(e.target.files || [])]
-    e.target.value = ''
+  const addImageFiles = async (files) => {
     const limits = S.current ? sess(S.current).imageLimits : null
     const maxN = (limits && limits.maxImagesPerMessage) || 20
     for (const f of files) {
@@ -1462,13 +1945,31 @@ function buildShell() {
       try { pendingImages.push(await fileToImage(f)) } catch (err) { toast(err.message, true) }
     }
     renderStrip()
+  }
+  $('#attach-btn').onclick = () => $('#attach-input').click()
+  $('#attach-input').addEventListener('change', async (e) => {
+    const files = [...(e.target.files || [])]
+    e.target.value = ''
+    await addImageFiles(files)
   })
   const input = $('#chat-input')
-  // contenteditable 只粘贴纯文本，避免富文本样式污染
+  // 粘贴：优先剪贴板图片（截图直接粘贴），否则只粘贴纯文本避免富文本污染
   input.addEventListener('paste', (e) => {
+    const cd = e.clipboardData || window.clipboardData
+    const files = cd && cd.files ? [...cd.files].filter((f) => /^image\//.test(f.type)) : []
     e.preventDefault()
-    const text = (e.clipboardData || window.clipboardData).getData('text/plain')
+    if (files.length) { addImageFiles(files); return }
+    const text = cd ? cd.getData('text/plain') : ''
     document.execCommand('insertText', false, text)
+  })
+  // 输入草稿：按会话持久化
+  input.addEventListener('input', () => {
+    if (!S.current) return
+    try {
+      const t = input.textContent
+      if (t && t.trim()) localStorage.setItem(draftKey(S.current), t)
+      else localStorage.removeItem(draftKey(S.current))
+    } catch (e) {}
   })
   input.addEventListener('focus', () => {
     setTimeout(() => { const sc = chatScrollEl(); if (sc) sc.scrollTop = sc.scrollHeight }, 250)
@@ -1486,6 +1987,7 @@ function buildShell() {
     pendingImages = []
     renderStrip()
     input.textContent = ''
+    clearDraft(S.current)
     vibrate(8)
     sendPrompt(S.current, text, images)  // 乐观上屏，失败在气泡上重试
   }
@@ -1512,12 +2014,10 @@ document.addEventListener('visibilitychange', () => {
   if (document.hidden) return
   loadBase()
   // 手机浏览器会挂起后台 tab 的 WS：回前台时按需重连
-  if (muxStream) muxStream.reconnect()
-  if (hostStream) hostStream.reconnect()
+  Mux.reconnect()
 })
 route()
 loadBase()
-startMux()
-startHostStream()
+Mux.connect()
 setInterval(() => { if (S.connState !== 'online') loadBase() }, 15000)
 })()
