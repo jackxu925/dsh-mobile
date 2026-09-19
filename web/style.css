@@ -619,3 +619,46 @@ html.light .queue-chip { border-color: rgba(15,23,42,.22); }
 
 /* 修复：flex 纵向容器里 overflow:hidden 的卡片会被压缩到 0（提问卡被挤成 2px → "什么都看不见"） */
 .chat-scroll > * { flex-shrink: 0; }
+
+/* ============ 布局 v2：去底栏 / FAB / 待办chip / 标题栏运行态 / meta 行 ============ */
+/* 列表：内容直达屏幕底缘；滚动留白只为最后一张卡能滚出 FAB 下方（非静态浪费） */
+#list-scroll { padding-bottom: 84px; }
+/* 待办过滤 chip（有待办才显示） */
+.search-row { display:flex; gap:8px; padding:10px 16px 4px; max-width:780px; margin:0 auto; width:100%; }
+.search-row .search { flex:1; }
+.todo-chip { flex:none; display:flex; align-items:center; gap:6px; height:38px; padding:0 13px; border-radius:12px; border:1px solid rgba(255,159,10,.35); background:rgba(255,159,10,.12); color:var(--orange); font-size:13px; font-weight:700; }
+.todo-chip:active { transform:scale(.95); }
+.todo-chip .n { background:var(--orange); color:#000; border-radius:9px; font-size:11px; min-width:17px; height:17px; display:flex; align-items:center; justify-content:center; font-variant-numeric:tabular-nums; }
+.todo-chip.act { background:var(--orange); color:#000; }
+.todo-chip.act .n { background:rgba(0,0,0,.25); color:#fff; }
+/* FAB 新会话 */
+.fab { position:absolute; right:18px; bottom:20px; z-index:8; width:54px; height:54px; border-radius:17px; border:none; background:var(--accent); color:#fff; box-shadow:0 10px 26px rgba(59,130,246,.42); display:flex; align-items:center; justify-content:center; }
+.fab:active { transform:scale(.9); }
+.fab svg { width:24px; height:24px; }
+/* 标题栏运行态 + 停止钮 */
+.subtitle.running { color:#6aa6ff; display:flex; align-items:center; gap:5px; }
+.run-dot { width:6px; height:6px; border-radius:50%; background:#6aa6ff; animation:meta-pulse 1.4s infinite; flex:none; }
+@keyframes meta-pulse { 50% { opacity:.25 } }
+.nav-stop { width:33px; height:33px; flex:none; border-radius:50%; border:1px solid rgba(255,69,58,.5); background:rgba(255,69,58,.12); color:var(--red); display:flex; align-items:center; justify-content:center; }
+.nav-stop:active { transform:scale(.88); }
+/* meta 行：时间 · 复制 · 思考 */
+.meta-row { display:flex; align-items:center; gap:2px; padding:0 4px; min-height:30px; }
+.msg.user .meta-row { flex-direction:row-reverse; }
+.meta-time { font-size:11px; color:var(--text-3); font-variant-numeric:tabular-nums; margin-right:6px; }
+.msg.user .meta-time { margin-right:0; margin-left:6px; }
+.meta-pending { font-size:11px; color:var(--text-3); }
+.meta-ico { width:30px; height:30px; border-radius:9px; border:none; background:none; color:var(--text-3); display:flex; align-items:center; justify-content:center; cursor:pointer; }
+.meta-ico:active { background:var(--bg-card-2); transform:scale(.85); }
+.meta-ico svg { width:14px; height:14px; }
+.meta-ico.think.live { color:var(--purple); }
+.meta-ico.think.live .td { animation:meta-wave 1.1s ease-in-out infinite; }
+.meta-ico.think.live .td:nth-child(2) { animation-delay:.15s }
+.meta-ico.think.live .td:nth-child(3) { animation-delay:.3s }
+@keyframes meta-wave { 0%,100% { transform:translateY(0); opacity:.5 } 50% { transform:translateY(-2.2px); opacity:1 } }
+/* 底部压平：输入框直贴屏幕底缘（键盘弹起时同样 4px） */
+.composer-wrap { padding:6px 12px 4px; }
+.composer-wrap:focus-within { padding-bottom:4px; }
+/* 浅色主题适配 */
+html.light .fab { box-shadow:0 10px 26px rgba(37,99,235,.35); }
+html.light .subtitle.running { color:#2563eb; }
+html.light .run-dot { background:#2563eb; }

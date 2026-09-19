@@ -669,15 +669,20 @@ function itemNode(s, item) {
       const m = el('div', 'msg user')
       const b = el('div', 'bubble' + (item.pending ? ' pending' : '') + (item.failed ? ' failed' : ''))
       if (item.text) b.appendChild(document.createTextNode(item.text))
-      b._copyText = item.text
       if (item.images) for (const img of item.images) {
-        if (img.previewUrl) { const im = el('img', 'msg-img'); im.src = img.previewUrl; im.alt = img.name || '图片'; b.appendChild(im) }
+        if (img.previewUrl) { const im = el('img', 'msg-img'); im.src = im.previewUrl || img.previewUrl; im.alt = img.name || '图片'; b.appendChild(im) }
         else if (img.attachmentId) b.appendChild(attachImgEl(s, img))
       }
       m.appendChild(b)
-      const meta = el('div', 'm-meta')
-      meta.appendChild(el('span', null, fmtTime(item.time)))
-      if (item.pending) meta.appendChild(el('span', null, '发送中…'))
+      // meta 行：时间 · 复制（右对齐）；失败态在此重试
+      const meta = el('div', 'meta-row')
+      meta.appendChild(el('span', 'meta-time', fmtTime(item.time)))
+      if (item.pending) meta.appendChild(el('span', 'meta-pending', '发送中…'))
+      if (item.text) {
+        const cp = metaIcon('copy', '复制这条消息')
+        cp.onclick = () => { vibrate(8); copyText(item.text, () => {}) ; toast('已复制 ✓') }
+        meta.appendChild(cp)
+      }
       if (item.failed) {
         const r = el('span', 'retry-send', '发送失败 · 点按重试')
         meta.appendChild(r)
@@ -688,15 +693,19 @@ function itemNode(s, item) {
     }
     case 'assistant': {
       const m = el('div', 'msg bot')
-      const row = el('div', 'brow')
       const b = el('div', 'bubble')
       b.innerHTML = md(item.text)
-      b._copyText = item.text
-      row.appendChild(b)
-      // 思考过的消息：气泡右侧挂「打字泡」静点，点按从底部抽屉读当时的思考全文
-      if (item.reasoning && item.reasoning.trim()) row.appendChild(thinkDot(() => openThink({ text: item.reasoning, live: false })))
-      m.appendChild(row)
-      if (item.time) m.appendChild(el('div', 'm-meta', fmtTime(item.time)))
+      m.appendChild(b)
+      // meta 行：时间 · 复制 · 思考（左对齐）
+      const meta = el('div', 'meta-row')
+      if (item.time) meta.appendChild(el('span', 'meta-time', fmtTime(item.time)))
+      if (item.text) {
+        const cp = metaIcon('copy', '复制这条消息')
+        cp.onclick = () => { vibrate(8); copyText(item.text, () => {}); toast('已复制 ✓') }
+        meta.appendChild(cp)
+      }
+      if (item.reasoning && item.reasoning.trim()) meta.appendChild(thinkDot(() => openThink({ text: item.reasoning, live: false })))
+      m.appendChild(meta)
       return m
     }
     case 'tool': return toolNode(item)
@@ -749,30 +758,34 @@ function renderLive(s, rebuild) {
   if (!node) {
     node = el('div', 'msg bot')
     node.id = 'live-bubble'
-    const row = el('div', 'brow')
-    row.appendChild(el('div', 'bubble'))
-    node.appendChild(row)
+    node.appendChild(el('div', 'bubble'))
+    const meta = el('div', 'meta-row')
+    meta.appendChild(thinkDot(() => openThink({ session: s, live: true }), true))
+    node.appendChild(meta)
     sc.appendChild(node)
   }
-  const row = node.firstChild
+  const b = node.querySelector('.bubble')
   const text = Object.keys(s.live.texts).sort((a, b) => a - b).map((k) => s.live.texts[k]).join('')
   const reasoningText = s.live.reasoning ? Object.keys(s.live.reasoning).sort((a, b) => a - b).map((k) => s.live.reasoning[k]).join('') : ''
   const thinking = !!reasoningText && !text
-  const b = row.firstChild
   b.textContent = (thinking ? '正在思考…' : '') + text
   b.appendChild(el('span', 'caret'))
-  // 正在思考：气泡旁换成活体打字泡，点按抽屉看实时思考流
-  if (reasoningText && !row.querySelector('.tk-dot')) {
-    row.appendChild(thinkDot(() => openThink({ session: s, live: true }), true))
-  }
   pumpThinkDrawer(s)  // 抽屉开着时实时灌入
   scrollBottom(sc)
   if (!nearBottom(sc)) showNewMsgPill()  // 用户在翻历史：不打断阅读，提示有新内容
 }
-/* 气泡旁的思考小圆钮（方案 D）：live=紫色三点波浪，静态=灰色描边 */
+/* meta 行通用小图标钮（复制等） */
+function metaIcon(name, label) {
+  const d = el('button', 'meta-ico')
+  d.type = 'button'
+  d.setAttribute('aria-label', label || name)
+  d.innerHTML = ICONS[name] || ''
+  return d
+}
+/* 思考小图标（meta 行内）：live=紫色三点波浪，静态=灰色 */
 function thinkDot(onTap, live) {
-  const d = el('span', 'tk-dot st-type' + (live ? ' live' : ''))
-  d.setAttribute('role', 'button')
+  const d = el('button', 'meta-ico think' + (live ? ' live' : ''))
+  d.type = 'button'
   d.setAttribute('aria-label', live ? '查看正在进行的思考' : '查看思考过程')
   d.innerHTML = ICONS.think
   d.onclick = (e) => { e.stopPropagation(); vibrate(8); onTap() }
@@ -945,9 +958,22 @@ function sessionCard(s, showWs) {
   return card
 }
 function refreshBadges() {
+  // 待办 chip：有待办才出现（替代被删除的底栏待办 tab）
   const n = pendingCount()
-  const elN = $('#tab-badge')
-  if (elN) { elN.style.display = n ? 'flex' : 'none'; elN.textContent = n }
+  const chip = $('#todo-chip')
+  if (!chip) return
+  if (n > 0) {
+    chip.style.display = ''
+    chip.innerHTML = ''
+    chip.appendChild(icon('bolt', 13))
+    chip.appendChild(el('span', null, S.todoMode ? '看全部' : '待办'))
+    const nb = el('span', 'n', String(n))
+    chip.appendChild(nb)
+    chip.classList.toggle('act', S.todoMode)
+  } else {
+    chip.style.display = 'none'
+    S.todoMode = false
+  }
 }
 
 /* ================= 数据加载 ================= */
@@ -1340,16 +1366,12 @@ function showView(name) {
   updateTabs()
 }
 function updateTabs() {
+  // 底栏已移除：这里只维护列表页附属控件的可见性
   const h = location.hash || '#/'
-  document.querySelectorAll('.tabbar .tab').forEach((t) => {
-    const tab = t.dataset.tab
-    t.classList.toggle('on',
-      (tab === 'sessions' && !S.todoMode && h === '#/') ||
-      (tab === 'todo' && S.todoMode && h === '#/') ||
-      (tab === 'new' && h === '#/new'))
-  })
   const seg = $('#list-seg')
   if (seg) seg.style.display = (h === '#/') && !S.todoMode ? 'flex' : 'none'
+  const fab = $('#fab-new')
+  if (fab) fab.style.display = (h === '#/') ? '' : 'none'
 }
 /* 输入草稿：按会话持久化，切走/被杀后台不丢 */
 const draftKey = (id) => 'dshm-draft:' + id
@@ -1398,8 +1420,6 @@ function reloadCurrent() {
 }
 function refreshChatChrome(s) {
   const off = S.connState !== 'online'
-  const bar = $('#running-bar')
-  if (bar) bar.classList.toggle('show', !!s.running)
   const input = $('#chat-input')
   if (input) {
     input.dataset.ph = off ? '连接已断开…' : s.running ? '追加指令（steer）…' : '发消息…'
@@ -1407,8 +1427,25 @@ function refreshChatChrome(s) {
   }
   const send = $('#send-btn')
   if (send) send.disabled = off
+  // 运行状态上移标题栏：副标题「● 正在工作中」+ ⏹ 停止钮（仅运行时），输入框上不再有易误触的运行条
+  const stop = $('#nav-stop')
+  if (stop) {
+    stop.style.display = s.running ? '' : 'none'
+    if (s.running && !stop._wired) {
+      stop._wired = true
+      stop.innerHTML = ''
+      stop.appendChild(icon('stop', 13))
+      stop.onclick = () => { vibrate(8); if (S.current) cancelSession(S.current) }
+    }
+  }
   const sub = $('#chat-sub')
-  if (sub) { sub.textContent = off ? '连接已断开，重连中…' : (s.cwd || ''); sub.classList.toggle('off', off) }
+  if (sub) {
+    sub.classList.toggle('off', off)
+    sub.classList.toggle('running', !off && !!s.running)
+    if (off) sub.textContent = '连接已断开，重连中…'
+    else if (s.running) { sub.textContent = ''; sub.appendChild(el('span', 'run-dot')); sub.appendChild(el('span', null, '正在工作中')) }
+    else sub.textContent = s.cwd || ''
+  }
 }
 function route() {
   const h = location.hash || '#/'
@@ -1865,28 +1902,27 @@ function buildShell() {
     </div></div>
     <div class="scroll" id="list-scroll">
       <div class="ptr" id="ptr"></div>
-      <div class="search-wrap"><input class="search" id="search" placeholder="搜索会话" autocapitalize="off" autocorrect="off" spellcheck="false" aria-label="搜索会话"></div>
+      <div class="search-row">
+        <input class="search" id="search" placeholder="搜索会话" autocapitalize="off" autocorrect="off" spellcheck="false" aria-label="搜索会话">
+        <button class="todo-chip" id="todo-chip" type="button" aria-label="只看待处理" style="display:none"></button>
+      </div>
       <div class="list-seg" id="list-seg" role="tablist" aria-label="列表排序方式">
         <button class="seg-btn" data-mode="time" type="button" role="tab">最近活跃</button>
         <button class="seg-btn" data-mode="workspace" type="button" role="tab">按工作区</button>
       </div>
       <div id="session-list"></div>
     </div>
-    <div class="tabbar">
-      <button class="tab on" data-tab="sessions" id="tab-sessions" aria-label="会话"><span class="ico" data-ic="chat"></span>会话</button>
-      <button class="tab" data-tab="todo" id="tab-todo" aria-label="待办"><span class="ico" data-ic="bolt"><span class="n" id="tab-badge" style="display:none">0</span></span>待办</button>
-      <button class="tab" data-tab="new" id="tab-new" aria-label="新会话"><span class="ico" data-ic="plus"></span>新会话</button>
-    </div>
+    <button class="fab" id="fab-new" type="button" aria-label="新会话"><span class="ic-slot" data-ic="plus"></span></button>
   </div>
   <div class="view" id="view-chat">
     <div class="navbar"><div class="bar">
       <button class="nav-btn back" id="chat-back" aria-label="返回"><span class="ic-slot" data-ic="back"></span></button>
       <div class="title"><span id="chat-title"></span><div class="subtitle" id="chat-sub"></div></div>
+      <button class="nav-stop" id="nav-stop" type="button" aria-label="停止当前任务" style="display:none"></button>
       <button class="nav-btn" id="chat-more" aria-label="会话设置"><span class="ic-slot" data-ic="more"></span></button>
     </div></div>
     <div class="chat-scroll" id="chat-scroll"></div>
     <div class="composer-wrap">
-      <div class="running-bar" id="running-bar"><span>●</span> Agent 正在工作…<button class="stop" id="stop-btn" aria-label="停止当前任务"><span class="ic-slot" data-ic="stop"></span>停止</button></div>
       <div class="attach-strip" id="attach-strip"></div>
       <div class="composer">
         <button class="c-btn" id="attach-btn" aria-label="添加图片"><span class="ic-slot" data-ic="plus"></span></button>
@@ -1953,15 +1989,12 @@ function buildShell() {
   $('#chat-more').onclick = () => { if (S.current) openSheet(sess(S.current)) }
   $('#sheet-overlay').addEventListener('click', (e) => { if (e.target.id === 'sheet-overlay') closeSheet() })
   $('#new-cancel').onclick = () => { location.hash = '#/' }
-  $('#tab-new').onclick = () => { S.todoMode = false; location.hash = '#/new'; updateTabs() }
-  $('#tab-sessions').onclick = () => { S.todoMode = false; if (location.hash !== '#/') location.hash = '#/'; renderList(); updateTabs() }
-  $('#tab-todo').onclick = () => { S.todoMode = true; if (location.hash !== '#/') location.hash = '#/'; renderList(); updateTabs() }
+  $('#fab-new').onclick = () => { vibrate(8); S.todoMode = false; location.hash = '#/new'; updateTabs() }
+  $('#todo-chip').onclick = () => { vibrate(8); S.todoMode = !S.todoMode; renderList(); refreshBadges(); updateTabs() }
   $('#start-btn').onclick = startSession
-  $('#stop-btn').onclick = () => S.current && cancelSession(S.current)
   initPtr($('#list-scroll'))
   initSwipeBack()
   initSheetDrag()
-  initLongPressCopy($('#chat-scroll'))
   // 思考抽屉：背景/✕ 关闭 + 下拽关闭（与 ⋯ 面板同手势语言）
   $('#think-overlay').addEventListener('click', (e) => { if (e.target.id === 'think-overlay') closeThink() })
   $('#think-close').onclick = closeThink
