@@ -584,3 +584,33 @@ html.light .new-msg-pill { box-shadow: 0 6px 20px rgba(15,23,42,.22); }
 /* todo/queue 卡虚线描边在浅底下加深 */
 html.light .queue-chip { border-color: rgba(15,23,42,.22); }
 /* 图片查看器保持深色（iOS 浅色 App 惯例），无需覆盖 */
+
+/* ============ 思考入口（方案 D · 打字泡图标 + 底部抽屉） ============ */
+.msg.bot .brow { display:flex; align-items:flex-end; gap:7px; min-width:0; }
+.msg.bot .brow .bubble { max-width:calc(100% - 34px); }
+.tk-dot {
+  width:26px; height:26px; border-radius:50%; flex:none; margin-bottom:2px;
+  display:flex; align-items:center; justify-content:center;
+  border:1px solid var(--line); background:var(--bg-card); color:var(--text-3);
+  cursor:pointer; transition:transform .16s var(--ease-out), border-color .2s ease, color .2s ease, background-color .2s ease;
+}
+.tk-dot:active { transform:scale(.88); }
+.tk-dot svg { width:14px; height:14px; }
+/* 思考中：紫色 + 三点波浪 */
+.tk-dot.live { color:var(--purple); border-color:rgba(191,90,242,.45); background:rgba(191,90,242,.14); }
+.tk-dot.live .td { animation:tkd-wave 1.1s ease-in-out infinite; }
+.tk-dot.live .td:nth-child(2) { animation-delay:.15s }
+.tk-dot.live .td:nth-child(3) { animation-delay:.3s }
+@keyframes tkd-wave { 0%,100% { transform:translateY(0); opacity:.5 } 50% { transform:translateY(-2.4px); opacity:1 } }
+/* 思考抽屉（复用 .sheet 的外观与手势） */
+.think-sheet { max-height:76%; }
+.think-head { display:flex; align-items:center; gap:8px; padding:2px 16px 10px; flex:none; }
+.think-title { font-size:13px; font-weight:700; color:var(--text-2); display:flex; align-items:center; gap:6px; }
+.think-title .ic { color:var(--purple); }
+.think-live { font-size:11px; font-weight:600; color:var(--purple); background:rgba(191,90,242,.14); border-radius:10px; padding:2px 8px; display:none; align-items:center; gap:5px; }
+.think-live.on { display:inline-flex; }
+.think-live .dot { width:6px; height:6px; border-radius:50%; background:var(--purple); animation:tkd-pulse 1.2s infinite; }
+@keyframes tkd-pulse { 0%,100% { opacity:1 } 50% { opacity:.25 } }
+.think-close { margin-left:auto; width:30px; height:30px; border-radius:50%; border:none; background:var(--bg-card-2); color:var(--text-2); font-size:13px; }
+.think-close:active { transform:scale(.9); }
+.think-body { overflow-y:auto; -webkit-overflow-scrolling:touch; padding:0 16px 22px; font-size:12.5px; line-height:1.75; color:var(--text-2); font-family:var(--mono); white-space:pre-wrap; word-break:break-word; }

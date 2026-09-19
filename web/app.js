@@ -64,6 +64,8 @@ const ICONS = {
   moon: SVG_OPEN + '<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>',
   copy: SVG_OPEN + '<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>',
   brain: SVG_OPEN + '<path d="M9.5 3a2.5 2.5 0 0 0-2.5 2.5c0 .4.1.7.2 1A3.5 3.5 0 0 0 5 13.5a3.5 3.5 0 0 0 2.2 6.2A2.5 2.5 0 0 0 11 21V5.5A2.5 2.5 0 0 0 9.5 3z"/><path d="M14.5 3a2.5 2.5 0 0 1 2.5 2.5c0 .4-.1.7-.2 1a3.5 3.5 0 0 1 2.2 7A3.5 3.5 0 0 1 16.8 19.7 2.5 2.5 0 0 1 13 21V5.5A2.5 2.5 0 0 1 14.5 3z"/></svg>',
+  /* 思考图标（用户选定「打字泡」）：气泡里三颗点，live 时 CSS 驱动波浪 */
+  think: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M21 11.5a8.5 8.5 0 0 1-8.5 8.5c-1.6 0-3.1-.4-4.3-1.1L3 20l1.2-5.2A8.5 8.5 0 1 1 21 11.5z"/><circle class="td" cx="8.6" cy="11.5" r="1.15" fill="currentColor" stroke="none"/><circle class="td" cx="12.4" cy="11.5" r="1.15" fill="currentColor" stroke="none"/><circle class="td" cx="16.2" cy="11.5" r="1.15" fill="currentColor" stroke="none"/></svg>',
 }
 const icon = (name, size) => {
   const s = document.createElement('span')
@@ -315,6 +317,7 @@ function foldEvent(s, event, view) {
       if (!text.trim() && !reasoning.trim()) return
       endLive(s, d.turn, d.step)
       s.items.push({ kind: 'assistant', text, reasoning, time: event.time })
+      settleThinkDrawer(s)  // 抽屉若在直播这轮思考：熄灭「正在思考」徽标，正文保留
       if (text.trim()) s.lastPreview = text
       break
     }
@@ -685,12 +688,14 @@ function itemNode(s, item) {
     }
     case 'assistant': {
       const m = el('div', 'msg bot')
-      // 思考过程：默认折叠、点按展开读全量（替代原来的"桌面端可见"提示行）
-      if (item.reasoning && item.reasoning.trim()) m.appendChild(reasoningNode(item.reasoning))
+      const row = el('div', 'brow')
       const b = el('div', 'bubble')
       b.innerHTML = md(item.text)
       b._copyText = item.text
-      m.appendChild(b)
+      row.appendChild(b)
+      // 思考过的消息：气泡右侧挂「打字泡」静点，点按从底部抽屉读当时的思考全文
+      if (item.reasoning && item.reasoning.trim()) row.appendChild(thinkDot(() => openThink({ text: item.reasoning, live: false })))
+      m.appendChild(row)
       if (item.time) m.appendChild(el('div', 'm-meta', fmtTime(item.time)))
       return m
     }
@@ -744,31 +749,76 @@ function renderLive(s, rebuild) {
   if (!node) {
     node = el('div', 'msg bot')
     node.id = 'live-bubble'
-    node.appendChild(el('div', 'bubble'))
+    const row = el('div', 'brow')
+    row.appendChild(el('div', 'bubble'))
+    node.appendChild(row)
     sc.appendChild(node)
   }
+  const row = node.firstChild
   const text = Object.keys(s.live.texts).sort((a, b) => a - b).map((k) => s.live.texts[k]).join('')
-  const thinking = s.live.reasoning && Object.keys(s.live.reasoning).length > 0 && !text
-  const b = node.firstChild
-  b.textContent = (thinking ? '🧠 思考中… ' : '') + text
+  const reasoningText = s.live.reasoning ? Object.keys(s.live.reasoning).sort((a, b) => a - b).map((k) => s.live.reasoning[k]).join('') : ''
+  const thinking = !!reasoningText && !text
+  const b = row.firstChild
+  b.textContent = (thinking ? '正在思考…' : '') + text
   b.appendChild(el('span', 'caret'))
+  // 正在思考：气泡旁换成活体打字泡，点按抽屉看实时思考流
+  if (reasoningText && !row.querySelector('.tk-dot')) {
+    row.appendChild(thinkDot(() => openThink({ session: s, live: true }), true))
+  }
+  pumpThinkDrawer(s)  // 抽屉开着时实时灌入
   scrollBottom(sc)
   if (!nearBottom(sc)) showNewMsgPill()  // 用户在翻历史：不打断阅读，提示有新内容
 }
-/* 思考过程折叠块（默认收起，点按展开读全量） */
-function reasoningNode(text) {
-  const box = el('div', 'reasoning')
-  const head = el('div', 'reasoning-head')
-  head.setAttribute('role', 'button')
-  head.appendChild(icon('brain', 14))
-  head.appendChild(el('span', null, '思考过程'))
-  const chev = el('span', 'tool-chev', '▶')
-  head.appendChild(chev)
-  const body = el('div', 'reasoning-body', text)
-  head.onclick = () => { box.classList.toggle('open'); vibrate(6) }
-  box.append(head, body)
-  return box
+/* 气泡旁的思考小圆钮（方案 D）：live=紫色三点波浪，静态=灰色描边 */
+function thinkDot(onTap, live) {
+  const d = el('span', 'tk-dot st-type' + (live ? ' live' : ''))
+  d.setAttribute('role', 'button')
+  d.setAttribute('aria-label', live ? '查看正在进行的思考' : '查看思考过程')
+  d.innerHTML = ICONS.think
+  d.onclick = (e) => { e.stopPropagation(); vibrate(8); onTap() }
+  return d
 }
+/* 思考抽屉：底部拉起，直播中实时滚动 */
+const thinkDrawer = { session: null, live: false }
+function openThink(opts) {
+  const ov = $('#think-overlay'), dr = $('#think-drawer'), body = $('#think-body'), liveBadge = $('#think-live')
+  thinkDrawer.session = opts.session || null
+  thinkDrawer.live = !!opts.live
+  body.textContent = opts.live ? liveReasoningText(opts.session) : (opts.text || '')
+  liveBadge.classList.toggle('on', !!opts.live)
+  ov.classList.add('open'); dr.classList.add('open')
+  body.scrollTop = body.scrollHeight
+}
+function liveReasoningText(s) {
+  if (!s || !s.live || !s.live.reasoning) return ''
+  return Object.keys(s.live.reasoning).sort((a, b) => a - b).map((k) => s.live.reasoning[k]).join('')
+}
+function closeThink() {
+  $('#think-overlay').classList.remove('open')
+  $('#think-drawer').classList.remove('open')
+  thinkDrawer.session = null; thinkDrawer.live = false
+}
+/* 抽屉打开期间，思考流增量实时灌入 */
+function pumpThinkDrawer(s) {
+  if (!thinkDrawer.session || thinkDrawer.session.id !== s.id) return
+  if (!$('#think-drawer').classList.contains('open')) return
+  const body = $('#think-body')
+  body.textContent = liveReasoningText(s)
+  body.scrollTop = body.scrollHeight
+}
+function settleThinkDrawer(s) {
+  if (s && thinkDrawer.session && thinkDrawer.session.id !== s.id) return
+  const b = $('#think-live')
+  if (b) b.classList.remove('on')
+  // 直播结束时把最终完整思考（来自事件的 reasoning 块）灌入抽屉，用户无感续读
+  if (s && thinkDrawer.session && thinkDrawer.session.id === s.id) {
+    const body = $('#think-body')
+    const last = [...s.items].reverse().find((i) => i.kind === 'assistant' && i.reasoning && i.reasoning.trim())
+    if (body && last && last.reasoning.trim()) body.textContent = last.reasoning
+    thinkDrawer.live = false
+  }
+}
+
 
 /* ================= 渲染：会话列表 ================= */
 function statusBadge(s) {
@@ -1867,6 +1917,17 @@ function buildShell() {
       <div class="sheet-scroll" id="sheet-content"></div>
     </div>
   </div>
+  <div class="sheet-overlay" id="think-overlay" aria-hidden="true">
+    <div class="sheet think-sheet" role="dialog" aria-label="思考过程">
+      <div class="grabber"></div>
+      <div class="think-head">
+        <span class="think-title">思考过程</span>
+        <span class="think-live" id="think-live"><span class="dot"></span>正在思考</span>
+        <button class="think-close" id="think-close" type="button" aria-label="关闭">✕</button>
+      </div>
+      <div class="think-body" id="think-body"></div>
+    </div>
+  </div>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>`
   // 注入 SVG 图标
   document.querySelectorAll('[data-ic]').forEach((slot) => {
@@ -1900,6 +1961,33 @@ function buildShell() {
   initSwipeBack()
   initSheetDrag()
   initLongPressCopy($('#chat-scroll'))
+  // 思考抽屉：背景/✕ 关闭 + 下拽关闭（与 ⋯ 面板同手势语言）
+  $('#think-overlay').addEventListener('click', (e) => { if (e.target.id === 'think-overlay') closeThink() })
+  $('#think-close').onclick = closeThink
+  ;(function () {
+    const sheet = $('#think-overlay .sheet'), body = $('#think-body')
+    let dragging = false, sy = 0, dy = 0
+    sheet.addEventListener('touchstart', (e) => {
+      if (e.target.closest('.think-close')) return
+      if (body.scrollTop <= 0 || e.target.closest('.grabber')) { dragging = true; sy = e.touches[0].clientY; dy = 0 }
+    }, { passive: true })
+    sheet.addEventListener('touchmove', (e) => {
+      if (!dragging) return
+      dy = Math.max(0, e.touches[0].clientY - sy)
+      if (dy > 0 && body.scrollTop <= 0) { sheet.classList.add('dragging'); sheet.style.transform = 'translateY(' + dy + 'px)'; if (e.cancelable) e.preventDefault() }
+    }, { passive: false })
+    const finish = () => {
+      if (!dragging) return
+      dragging = false
+      sheet.classList.remove('dragging')
+      const shouldClose = dy > 100
+      sheet.style.transform = ''
+      if (shouldClose) closeThink()
+      dy = 0
+    }
+    sheet.addEventListener('touchend', finish)
+    sheet.addEventListener('touchcancel', finish)
+  })()
   // 深浅色主题：初始化 + 切换（localStorage 持久化，不跟随系统以免覆盖用户选择）
   initTheme()
   $('#theme-toggle').onclick = () => { toggleTheme(); vibrate(8) }
