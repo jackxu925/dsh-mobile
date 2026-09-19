@@ -196,6 +196,10 @@ function sess(id) {
       models: null,                    // session/modelCatalog 缓存
       modelSel: null,                  // 当前模型选择 {provider,model,reasoningEffort}（modelSelection.next）
       imageLimits: null,               // imageLimits 投影
+      ctxPressure: null,               // {pressureTokens, projectedTokens, contextWindow}
+      ctxBreakdown: null,              // {systemTokens, toolsTokens, messageTokens}
+      tokenUsage: null,                // {uncachedInputTokens, outputTokens, cacheReadTokens}
+      sessionStats: null,              // {turns, steps, llmMs, toolMs}
       _resolveLoad: null,              // loadHistory 的快照到达回调
     }
     S.sessions.set(id, s)
@@ -733,17 +737,7 @@ function itemNode(s, item) {
   return el('div')
 }
 function renderChatPending(s, sc) {
-  // 队列消息（其它端发来的排队/插话消息；本设备的已由乐观气泡显示）
-  for (const q of s.queue) {
-    const rid = q.message && q.message.source && q.message.source.rpcId
-    if (rid && s.items.some((x) => x.kind === 'user' && x.rpcId === rid)) continue
-    const text = textOf(q.message && q.message.content)
-    if (!text.trim()) continue
-    const chip = el('div', 'queue-chip')
-    chip.appendChild(el('span', 'q-dot'))
-    chip.appendChild(el('span', 'q-text', (q.placement === 'steering' ? '插话 · ' : '排队 · ') + text))
-    sc.appendChild(chip)
-  }
+  // 排队/插话 chip 已上移至输入框上方的固定条（renderQueueStrip），不再混入对话流
   for (const a of s.approvals.values()) {
     const n = approvalNode(s, a); n.id = 'ap-' + cssId(a.approvalId); sc.appendChild(n)
   }
@@ -996,6 +990,19 @@ function applyListValues(s, values) {
   if (values.permissions && Array.isArray(values.permissions.options)) s.permissions = values.permissions
   if (values.imageLimits) s.imageLimits = values.imageLimits
   if (values.modelSelection && values.modelSelection.next) s.modelSel = values.modelSelection.next
+  applyStats(s, values)
+}
+/* 统计投影落地（上下文压力/构成/累计/运行统计），变更时刷新压力条 */
+function applyStats(s, values) {
+  let changed = false
+  if (values.contextPressure && typeof values.contextPressure.contextWindow === 'number') { s.ctxPressure = values.contextPressure; changed = true }
+  if (values.contextBreakdown && typeof values.contextBreakdown.messageTokens === 'number') { s.ctxBreakdown = values.contextBreakdown; changed = true }
+  if (values.tokenUsage && typeof values.tokenUsage.outputTokens === 'number') { s.tokenUsage = values.tokenUsage; changed = true }
+  if (values.sessionStats && typeof values.sessionStats.turns === 'number') { s.sessionStats = values.sessionStats; changed = true }
+  if (changed && S.current === s.id) {
+    updateCtxBar(s)
+    if (sheetSession === s.id) renderSheetSoon(s)
+  }
 }
 async function loadBase() {
   try {
@@ -1176,6 +1183,7 @@ function applyProjection(s, values) {
     if (sheetSession === s.id && s.models) renderSheet(s)
   }
   if (values.imageLimits) s.imageLimits = values.imageLimits
+  applyStats(s, values)
 }
 /* ---- control 流：全局队列与投影 ---- */
 Mux.handlers.control = (v) => {
@@ -1446,6 +1454,123 @@ function refreshChatChrome(s) {
     else if (s.running) { sub.textContent = ''; sub.appendChild(el('span', 'run-dot')); sub.appendChild(el('span', null, '正在工作中')) }
     else sub.textContent = s.cwd || ''
   }
+  updateCtxBar(s)
+  renderQueueStrip(s)
+  // 输入框 placeholder 明示发送模式（运行中按设置排队/插话；长按发送反向）
+  const input2 = $('#chat-input')
+  if (input2 && !off) {
+    input2.dataset.ph = s.running ? (busyEnter() === 'steer' ? '插话发送…（长按排队）' : '将排队发送…（长按插话）') : '发消息…'
+  }
+}
+/* ---- 上下文压力条（标题栏底边 2px） ---- */
+function updateCtxBar(s) {
+  const fill = $('#ctx-fill')
+  if (!fill) return
+  const p = s.ctxPressure
+  if (!p || !p.contextWindow) { fill.style.width = '0%'; return }
+  const pct = Math.max(0, Math.min(100, Math.round(p.pressureTokens / p.contextWindow * 100)))
+  fill.style.width = pct + '%'
+  fill.style.background = pct >= 90 ? 'var(--red)' : pct >= 70 ? 'var(--orange)' : 'var(--green)'
+}
+/* ---- 统计格式化 ---- */
+function fmtTok(n) {
+  if (n == null) return '—'
+  if (n >= 1e8) return (n / 1e8).toFixed(2).replace(/\.?0+$/, '') + '亿'
+  if (n >= 1e4) return (n / 1e4).toFixed(n >= 1e6 ? 0 : 1).replace(/\.0$/, '') + '万'
+  return String(n)
+}
+function fmtCtxTok(n) {
+  if (n == null) return '—'
+  if (n >= 1e6) return (n / 1e6).toFixed(n % 1e6 === 0 ? 0 : 1) + 'M'
+  if (n >= 1e3) return Math.round(n / 1e3) + 'k'
+  return String(n)
+}
+function fmtDur(ms) {
+  if (ms == null) return '—'
+  const m = Math.round(ms / 60000)
+  if (m < 60) return m + ' 分钟'
+  return (m / 60).toFixed(1) + ' 小时'
+}
+/* ---- 排队/插话 chip 条（输入框上方固定，点按出操作单） ---- */
+function renderQueueStrip(s) {
+  const strip = $('#q-strip')
+  if (!strip) return
+  strip.textContent = ''
+  const items = (s.queue || []).filter((q) => {
+    const rid = q.message && q.message.source && (q.message.source.requestId || q.message.source.rpcId)
+    return !(rid && s.items.some((x) => x.kind === 'user' && x.rpcId === rid))  // 本机乐观气泡已显示的不重复
+  })
+  strip.classList.toggle('show', items.length > 0)
+  let qi = 0
+  for (const q of items) {
+    qi++
+    const text = textOf(q.message && q.message.content)
+    if (!text.trim()) continue
+    const chip = el('button', 'q-chip' + (q.placement === 'steering' ? ' steer' : ''))
+    chip.type = 'button'
+    const dot = el('span', 'q-dot')
+    const tag = el('span', 'q-tag', q.placement === 'steering' ? '插话' : '排队 #' + qi)
+    const tx = el('span', 'q-text', text)
+    chip.append(dot, tag, tx)
+    chip.onclick = () => openQSheet(s, q)
+    strip.appendChild(chip)
+  }
+}
+/* 排队操作单：编辑 / 立即插话 / 删除 */
+function openQSheet(s, q) {
+  vibrate(8)
+  const ov = $('#q-ov'), sheet = $('#q-sheet')
+  const text = textOf(q.message && q.message.content)
+  $('#q-a-steer').style.display = q.placement === 'steering' ? 'none' : 'flex'
+  $('#q-edit-box').classList.remove('show')
+  $('#q-save').classList.remove('show')
+  $('#q-edit-box').textContent = text
+  const sid = s.id, itemId = q.id
+  $('#q-a-edit').onclick = () => {
+    vibrate(8)
+    $('#q-edit-box').classList.add('show')
+    $('#q-save').classList.add('show')
+    $('#q-edit-box').focus()
+  }
+  $('#q-save').onclick = async () => {
+    const newText = $('#q-edit-box').textContent.trim()
+    if (!newText) { toast('内容不能为空', true); return }
+    vibrate(8)
+    try {
+      await rpc('session/updateQueue', { request: { sessionId: sid, itemId, action: { kind: 'edit', content: [{ type: 'text', text: newText }] } } })
+      toast('已更新排队内容 ✓')
+      closeQSheet()
+    } catch (e) { toast('更新失败：' + e.message, true) }
+  }
+  $('#q-a-steer').onclick = async () => {
+    vibrate(8)
+    try {
+      await rpc('session/updateQueue', { request: { sessionId: sid, itemId, action: { kind: 'steer' } } })
+      toast('已转为插话 ⚡')
+      closeQSheet()
+    } catch (e) { toast('转换失败：' + e.message, true) }
+  }
+  $('#q-a-del').onclick = async () => {
+    vibrate(8)
+    try {
+      await rpc('session/updateQueue', { request: { sessionId: sid, itemId, action: { kind: 'remove' } } })
+      toast('已删除排队 🗑')
+      closeQSheet()
+    } catch (e) { toast('删除失败：' + e.message, true) }
+  }
+  ov.classList.add('open'); sheet.classList.add('open')
+}
+function closeQSheet() {
+  $('#q-ov').classList.remove('open')
+  $('#q-sheet').classList.remove('open')
+}
+/* 运行中发送模式：默认排队（与桌面一致），长按发送=本次反向 */
+function busyEnter() {
+  try { return localStorage.getItem('dshm-busy-enter') === 'steer' ? 'steer' : 'queue' } catch (e) { return 'queue' }
+}
+function setBusyEnter(v) {
+  try { localStorage.setItem('dshm-busy-enter', v) } catch (e) {}
+  if (S.current) refreshChatChrome(sess(S.current))
 }
 function route() {
   const h = location.hash || '#/'
@@ -1597,7 +1722,7 @@ async function startSession() {
 }
 
 /* ================= 发消息 / 停止 ================= */
-async function sendPrompt(id, text, images) {
+async function sendPrompt(id, text, images, forceMode) {
   const s = sess(id)
   const rpcId = uuid()
   const item = { kind: 'user', text: text || '', images: images && images.length ? images : null, time: Date.now(), pending: true, failed: false, rpcId }
@@ -1610,18 +1735,15 @@ async function sendPrompt(id, text, images) {
   if (text) content.push({ type: 'text', text })
   for (const im of images || []) content.push({ type: 'image', mediaType: im.mediaType, data: im.data, name: im.name })
   try {
-    // 运行中优先 steer（插话）；宿主判定不可 steer 时自动降级排队——
-    // 修「只能排队」：running 状态过期不该让用户的消息卡住
-    if (s.running) {
-      try {
-        await rpc('session/prompt', { request: { requestId: rpcId, sessionId: id, mode: 'steer', content, clientTimeZone: tz() } })
-      } catch (e) {
-        if (e.message && /steer/i.test(e.message)) {
-          await rpc('session/prompt', { request: { requestId: rpcId, sessionId: id, mode: 'queue', content, clientTimeZone: tz() } })
-        } else throw e
-      }
-    } else {
-      await rpc('session/prompt', { request: { requestId: rpcId, sessionId: id, mode: 'queue', content, clientTimeZone: tz() } })
+    // 运行中：按「运行中发送」设置（默认排队，与桌面一致）；长按发送可本次反向（forceMode）。
+    // 宿主判定不可 steer 时自动降级排队——running 状态过期不该让用户的消息卡住
+    const mode = (!s.running) ? 'queue' : (forceMode || busyEnter())
+    try {
+      await rpc('session/prompt', { request: { requestId: rpcId, sessionId: id, mode, content, clientTimeZone: tz() } })
+    } catch (e) {
+      if (mode === 'steer' && e.message && /steer/i.test(e.message)) {
+        await rpc('session/prompt', { request: { requestId: rpcId, sessionId: id, mode: 'queue', content, clientTimeZone: tz() } })
+      } else throw e
     }
     // 服务器已受理；保持 pending 样式直到 user/message 事件（进入会话）就地转正
   } catch (e) {
@@ -1728,6 +1850,85 @@ function renderSheet(s) {
     toast('已复制 ' + s.items.filter((i) => i.kind === 'user' || i.kind === 'assistant').length + ' 条消息')
   }
   c.appendChild(copyRow)
+  // ---- 统计 ----
+  renderStatsSection(s, c)
+  // ---- 运行中发送 ----
+  const beSec = el('div', 'sheet-sec'); beSec.appendChild(icon('send', 14)); beSec.appendChild(el('span', null, '运行中发送'))
+  c.appendChild(beSec)
+  const modeRow = el('div', 'mode-row')
+  for (const m of ['queue', 'steer']) {
+    const chip = el('span', 'chip' + (busyEnter() === m ? ' sel' : ''), m === 'queue' ? '排队（默认）' : '插话')
+    chip.onclick = () => { vibrate(8); setBusyEnter(m); renderSheet(s) }
+    modeRow.appendChild(chip)
+  }
+  c.appendChild(modeRow)
+  c.appendChild(el('div', 'sheet-note', '运行中点发送按此设置投递；长按发送按钮可本次反向。排队后可点输入框上方的 chip 编辑、转插话或删除。'))
+}
+/* 统计区：上下文环 + 构成 + 累计 + 运行统计 */
+function renderStatsSection(s, c) {
+  const stSec = el('div', 'sheet-sec'); stSec.appendChild(icon('bolt', 14)); stSec.appendChild(el('span', null, '统计'))
+  c.appendChild(stSec)
+  const p = s.ctxPressure
+  if (!p || !p.contextWindow) { c.appendChild(el('div', 'sheet-note', '暂无统计（会话加载后显示）')); return }
+  const pct = Math.max(0, Math.min(100, Math.round(p.pressureTokens / p.contextWindow * 100)))
+  const color = pct >= 90 ? 'var(--red)' : pct >= 70 ? 'var(--orange)' : 'var(--green)'
+  const circumference = 2 * Math.PI * 36
+  const hero = el('div', 'ctx-hero')
+  const ring = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+  ring.setAttribute('class', 'ring'); ring.setAttribute('viewBox', '0 0 84 84')
+  ring.innerHTML =
+    '<circle cx="42" cy="42" r="36" fill="none" stroke="var(--bg-card-2)" stroke-width="8"/>' +
+    '<circle cx="42" cy="42" r="36" fill="none" stroke="' + color + '" stroke-width="8" stroke-linecap="round" stroke-dasharray="' + circumference.toFixed(1) + '" stroke-dashoffset="' + (circumference * (1 - pct / 100)).toFixed(1) + '" transform="rotate(-90 42 42)"/>' +
+    '<text x="42" y="47" text-anchor="middle" font-size="16" font-weight="800" fill="var(--text)">' + pct + '%</text>'
+  hero.appendChild(ring)
+  const num = el('div', 'ctx-num')
+  const big = el('div', 'big')
+  big.innerHTML = esc(fmtCtxTok(p.pressureTokens)) + ' <small>/ ' + fmtCtxTok(p.contextWindow) + ' tokens</small>'
+  num.appendChild(big)
+  num.appendChild(el('div', 'cap', p.projectedTokens != null ? '下轮预估 ' + fmtCtxTok(p.projectedTokens) + ' · 剩余约 ' + fmtCtxTok(Math.max(0, p.contextWindow - p.pressureTokens)) : ''))
+  const brk = s.ctxBreakdown
+  if (brk && brk.messageTokens != null) {
+    const track = el('div', 'brkd')
+    for (const [v2, col] of [[brk.messageTokens, 'var(--accent)'], [brk.toolsTokens || 0, '#8b5cf6'], [brk.systemTokens || 0, 'var(--text-3)']]) {
+      const i2 = el('i'); i2.style.flex = String(Math.max(1, v2)); i2.style.background = col; track.appendChild(i2)
+    }
+    num.appendChild(track)
+    num.appendChild(el('div', 'cap', '消息 ' + fmtCtxTok(brk.messageTokens) + ' · 工具 ' + fmtCtxTok(brk.toolsTokens || 0) + ' · 系统 ' + fmtCtxTok(brk.systemTokens || 0)))
+  }
+  hero.appendChild(num)
+  c.appendChild(hero)
+  const kvGrid = (rows) => {
+    const g = el('div', 'kv-grid')
+    for (const [k, v2, unit] of rows) {
+      const kv = el('div', 'kv')
+      kv.appendChild(el('div', 'k', k))
+      const vEl = el('div', 'v', v2)
+      if (unit) vEl.appendChild(el('small', null, ' ' + unit))
+      kv.appendChild(vEl)
+      g.appendChild(kv)
+    }
+    return g
+  }
+  const tu = s.tokenUsage || {}
+  c.appendChild(kvGrid([
+    ['未缓存输入', fmtTok(tu.uncachedInputTokens)],
+    ['输出', fmtTok(tu.outputTokens)],
+    ['缓存命中', fmtTok(tu.cacheReadTokens)],
+    ['模型', (s.modelSel && (s.modelSel.model + (s.modelSel.reasoningEffort ? ' · ' + s.modelSel.reasoningEffort : ''))) || '—'],
+  ]))
+  const ss = s.sessionStats || {}
+  c.appendChild(kvGrid([
+    ['对话轮数', ss.turns != null ? String(ss.turns) : '—'],
+    ['模型调用', ss.steps != null ? String(ss.steps) : '—', ss.steps != null ? '步' : ''],
+    ['LLM 时间', fmtDur(ss.llmMs)],
+    ['工具时间', fmtDur(ss.toolMs)],
+  ]))
+}
+/* 投影统计变更时节流刷新面板 */
+let sheetSoonTimer = null
+function renderSheetSoon(s) {
+  if (sheetSoonTimer) return
+  sheetSoonTimer = setTimeout(() => { sheetSoonTimer = null; if (sheetSession === s.id) renderSheet(s) }, 250)
 }
 /* 整段对话导出为纯文本 */
 function sessionText(s) {
@@ -1920,9 +2121,11 @@ function buildShell() {
       <div class="title"><span id="chat-title"></span><div class="subtitle" id="chat-sub"></div></div>
       <button class="nav-stop" id="nav-stop" type="button" aria-label="停止当前任务" style="display:none"></button>
       <button class="nav-btn" id="chat-more" aria-label="会话设置"><span class="ic-slot" data-ic="more"></span></button>
+      <div class="ctx-bar" aria-hidden="true"><div class="ctx-fill" id="ctx-fill"></div></div>
     </div></div>
     <div class="chat-scroll" id="chat-scroll"></div>
     <div class="composer-wrap">
+      <div class="q-strip" id="q-strip"></div>
       <div class="attach-strip" id="attach-strip"></div>
       <div class="composer">
         <button class="c-btn" id="attach-btn" aria-label="添加图片"><span class="ic-slot" data-ic="plus"></span></button>
@@ -1963,6 +2166,16 @@ function buildShell() {
         <button class="think-close" id="think-close" type="button" aria-label="关闭">✕</button>
       </div>
       <div class="think-body" id="think-body"></div>
+    </div>
+  </div>
+  <div class="sheet-overlay" id="q-ov" aria-hidden="true">
+    <div class="sheet q-sheet" role="dialog" aria-label="排队消息管理">
+      <div class="grabber"></div>
+      <div class="act-row" id="q-a-edit"><span class="ic">✏️</span>编辑内容<span class="sub">修改这段排队的文本</span></div>
+      <div class="act-row" id="q-a-steer"><span class="ic">⚡</span>立即插话<span class="sub">不等本轮结束，马上生效</span></div>
+      <div class="act-row danger" id="q-a-del"><span class="ic">🗑</span>删除<span class="sub">取消这条排队</span></div>
+      <div class="q-edit-box" id="q-edit-box" contenteditable aria-label="编辑排队内容"></div>
+      <button class="q-save" id="q-save" type="button">保存修改</button>
     </div>
   </div>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>`
@@ -2116,7 +2329,7 @@ function buildShell() {
       e.preventDefault(); doSend()
     }
   })
-  const doSend = async () => {
+  const doSend = async (forceMode) => {
     const text = input.textContent.trim()
     if ((!text && !pendingImages.length) || !S.current) return
     if (S.connState !== 'online') { toast('当前离线，等待重连…', true); return }
@@ -2126,9 +2339,29 @@ function buildShell() {
     input.textContent = ''
     clearDraft(S.current)
     vibrate(8)
-    sendPrompt(S.current, text, images)  // 乐观上屏，失败在气泡上重试
+    sendPrompt(S.current, text, images, forceMode)  // 乐观上屏，失败在气泡上重试
   }
-  $('#send-btn').onclick = doSend
+  $('#send-btn').onclick = () => doSend(null)
+  // 长按发送 = 本次反向（默认排队 → 长按插话；反之亦然）
+  let sendLpTimer = null, sendLpFired = false
+  const sendBtn = $('#send-btn')
+  sendBtn.addEventListener('touchstart', () => {
+    sendLpFired = false
+    clearTimeout(sendLpTimer)
+    sendLpTimer = setTimeout(() => {
+      sendLpFired = true
+      vibrate([30, 40, 30])
+      const inv = busyEnter() === 'steer' ? 'queue' : 'steer'
+      toast(inv === 'steer' ? '本次将插话发送 ⚡' : '本次将排队发送 ⏳')
+      doSend(inv)
+    }, 420)
+  }, { passive: true })
+  const cancelLp = () => clearTimeout(sendLpTimer)
+  sendBtn.addEventListener('touchend', (e) => { cancelLp(); if (sendLpFired) { e.preventDefault(); sendLpFired = false } }, { passive: false })
+  sendBtn.addEventListener('touchmove', cancelLp)
+  sendBtn.addEventListener('touchcancel', cancelLp)
+  // 排队操作单：背景关闭 + 下拽关闭
+  $('#q-ov').addEventListener('click', (e) => { if (e.target.id === 'q-ov') closeQSheet() })
 }
 
 /* ================= 启动 ================= */

@@ -662,3 +662,44 @@ html.light .queue-chip { border-color: rgba(15,23,42,.22); }
 html.light .fab { box-shadow:0 10px 26px rgba(37,99,235,.35); }
 html.light .subtitle.running { color:#2563eb; }
 html.light .run-dot { background:#2563eb; }
+
+/* ============ v0.8: 压力条 / 排队条 / 操作单 / 统计面板 ============ */
+/* 标题栏底边 2px 上下文压力条 */
+.ctx-bar { position:absolute; left:0; right:0; bottom:-1.5px; height:2.5px; pointer-events:none; }
+.ctx-fill { height:100%; width:0%; background:var(--green); border-radius:0 2px 2px 0; transition:width .5s var(--ease-out), background-color .3s ease; }
+/* 输入框上方排队/插话 chip 固定条 */
+.q-strip { display:none; flex-direction:column; gap:6px; padding:0 2px 8px; }
+.q-strip.show { display:flex; }
+.q-chip { display:flex; align-items:center; gap:7px; background:var(--bg-card); border:.5px dashed var(--line); border-radius:15px; padding:8px 13px; font-size:13px; color:var(--text-2); cursor:pointer; text-align:left; width:100%; }
+.q-chip:active { background:var(--bg-card-2); }
+.q-chip .q-dot { width:6px; height:6px; border-radius:50%; background:var(--orange); animation:meta-pulse 1.2s infinite; flex:none; }
+.q-chip.steer .q-dot { background:#6aa6ff; }
+.q-chip .q-tag { font-size:10.5px; font-weight:700; color:var(--text-3); border:1px solid var(--line); border-radius:8px; padding:1px 6px; flex:none; }
+.q-chip .q-text { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+/* 排队操作单 */
+.q-sheet { max-height:64%; padding-bottom:14px; }
+.act-row { display:flex; align-items:center; gap:12px; padding:14px 20px; font-size:15.5px; font-weight:600; cursor:pointer; }
+.act-row:active { background:var(--bg-card); }
+.act-row .ic { width:22px; text-align:center; }
+.act-row.danger { color:var(--red); }
+.act-row .sub { font-size:11.5px; font-weight:400; color:var(--text-3); margin-left:auto; }
+.q-edit-box { display:none; margin:4px 16px 10px; background:var(--bg-card); border:.5px solid var(--line); border-radius:13px; padding:12px 14px; min-height:84px; font-size:15px; color:var(--text); outline:none; }
+.q-edit-box.show { display:block; }
+.q-save { display:none; margin:0 16px; width:calc(100% - 32px); padding:12px 0; border:none; border-radius:12px; background:var(--accent); color:#fff; font-size:15px; font-weight:700; }
+.q-save.show { display:block; }
+/* ⋯ 统计面板 */
+.ctx-hero { display:flex; align-items:center; gap:16px; padding:6px 16px 10px; }
+.ctx-hero .ring { width:84px; height:84px; flex:none; }
+.ctx-num { flex:1; min-width:0; }
+.ctx-num .big { font-size:21px; font-weight:800; font-variant-numeric:tabular-nums; }
+.ctx-num .big small { font-size:12px; font-weight:500; color:var(--text-3); }
+.ctx-num .cap { font-size:12px; color:var(--text-2); margin-top:3px; }
+.brkd { display:flex; height:6px; border-radius:3px; overflow:hidden; margin-top:8px; }
+.brkd i { height:100%; }
+.kv-grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; padding:2px 16px 8px; }
+.kv { background:var(--bg-card); border:.5px solid var(--line); border-radius:12px; padding:10px 12px; overflow:hidden; }
+.kv .k { font-size:11px; color:var(--text-3); }
+.kv .v { font-size:15.5px; font-weight:700; font-variant-numeric:tabular-nums; margin-top:3px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.kv .v small { font-size:11px; font-weight:400; color:var(--text-3); }
+.mode-row { display:flex; gap:8px; padding:2px 16px 4px; }
+.mode-row .chip { padding:9px 16px; }

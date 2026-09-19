@@ -1,6 +1,6 @@
 {
   "name": "dsh-mobile",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Mobile-native web surface for DeepSeek Harness: a phone-optimized PWA at /m that talks to the same /api as the desktop GUI — sessions, streaming, approvals, user questions. 手机原生体验的 DSH 界面。",
   "type": "module",
   "main": "lib/index.js",
