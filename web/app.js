@@ -1230,7 +1230,8 @@ Mux.handlers.events = (v) => {
       const s = sess(v.agentId)
       s.approvals.set(v.eventId, { eventId: v.eventId, approvalId: v.eventId, rpcId: v.eventId, toolName: req.toolName || '工具', callId: req.callId, reason: req.reason, outcome: null })
       vibrate([80, 60, 80])
-      toast('⚠️ ' + (req.toolName || '工具') + ' 等待审批 — 点按查看', { sessionId: s.id })
+      // 已经在该会话里：卡片就在眼前，toast 不带跳转（也不再压住卡片按钮）
+      toast('⚠️ ' + (req.toolName || '工具') + ' 等待审批' + (S.current === s.id ? '' : ' — 点按查看'), S.current === s.id ? undefined : { sessionId: s.id })
       if (S.current === s.id) renderChat(s, true)
       refreshBadges(); renderList()
     } else if (v.event === 'user-questions/request') {
@@ -1238,7 +1239,7 @@ Mux.handlers.events = (v) => {
       const s = sess(v.agentId)
       s.questions.set(v.eventId, { rpcId: v.eventId, questions: req.questions || [], outcome: null })
       vibrate([80, 60, 80])
-      toast('🤔 Agent 有一个问题 — 点按查看', { sessionId: s.id })
+      toast('🤔 Agent 有一个问题' + (S.current === s.id ? '' : ' — 点按查看'), S.current === s.id ? undefined : { sessionId: s.id })
       if (S.current === s.id) renderChat(s, true)
       refreshBadges(); renderList()
     }

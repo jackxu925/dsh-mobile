@@ -491,7 +491,9 @@ button, .session-card, .tool-head, .sheet-row, .tab, .pick-ws, .ask-opt, .chip, 
   box-shadow:0 8px 30px rgba(2,8,23,.55); max-width:86vw; overflow:hidden; text-overflow:ellipsis;
 }
 .toast.show { opacity:1; transform:translateX(-50%) translateY(0); }
-.toast.clickable { pointer-events:auto; border-color:rgba(59,130,246,.5); }
+/* 只有「正在显示」时才可交互：修复淡出后透明 toast 仍吞掉下方按钮点击的幽灵矩形 */
+.toast.clickable { border-color:rgba(59,130,246,.5); }
+.toast.show.clickable { pointer-events:auto; }
 
 /* 加载 */
 .spinner { display:inline-block; width:16px; height:16px; border:2px solid var(--text-3); border-top-color:transparent; border-radius:50%; animation:spin .7s linear infinite; vertical-align:-3px; }
@@ -614,3 +616,6 @@ html.light .queue-chip { border-color: rgba(15,23,42,.22); }
 .think-close { margin-left:auto; width:30px; height:30px; border-radius:50%; border:none; background:var(--bg-card-2); color:var(--text-2); font-size:13px; }
 .think-close:active { transform:scale(.9); }
 .think-body { overflow-y:auto; -webkit-overflow-scrolling:touch; padding:0 16px 22px; font-size:12.5px; line-height:1.75; color:var(--text-2); font-family:var(--mono); white-space:pre-wrap; word-break:break-word; }
+
+/* 修复：flex 纵向容器里 overflow:hidden 的卡片会被压缩到 0（提问卡被挤成 2px → "什么都看不见"） */
+.chat-scroll > * { flex-shrink: 0; }
