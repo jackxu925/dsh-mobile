@@ -703,3 +703,6 @@ html.light .run-dot { background:#2563eb; }
 .kv .v small { font-size:11px; font-weight:400; color:var(--text-3); }
 .mode-row { display:flex; gap:8px; padding:2px 16px 4px; }
 .mode-row .chip { padding:9px 16px; }
+
+/* ============ 会话长按操作单 ============ */
+.sess-menu-title { padding:2px 20px 8px; font-size:15px; font-weight:700; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text); }

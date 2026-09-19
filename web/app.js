@@ -962,10 +962,102 @@ function sessionCard(s, showWs) {
     }
   }
   card.appendChild(row3)
+  card.dataset.sid = s.id
   const open = () => { location.hash = '#/s/' + s.id }
   card.onclick = open
   card.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open() } }
   return card
+}
+/* 长按会话卡 → 操作单（重命名 / 分叉 / 归档 / 停止），对齐桌面能力 */
+let sessMenuTimer = null
+function initSessionLongPress(sc) {
+  if (!sc) return
+  sc.addEventListener('touchstart', (e) => {
+    const card = e.target.closest && e.target.closest('.session-card')
+    if (!card) return
+    clearTimeout(sessMenuTimer)
+    sessMenuTimer = setTimeout(() => {
+      vibrate([30, 40, 30])
+      openSessionMenu(card.dataset.sid, e.touches[0].clientX, e.touches[0].clientY)
+    }, 460)
+  }, { passive: true })
+  const cancel = () => clearTimeout(sessMenuTimer)
+  sc.addEventListener('touchend', cancel)
+  sc.addEventListener('touchmove', cancel)
+  sc.addEventListener('touchcancel', cancel)
+  // 桌面调试：右键唤出
+  sc.addEventListener('contextmenu', (e) => {
+    const card = e.target.closest && e.target.closest('.session-card')
+    if (!card) return
+    e.preventDefault()
+    openSessionMenu(card.dataset.sid, e.clientX, e.clientY)
+  })
+}
+function openSessionMenu(sid, x, y) {
+  const s = sess(sid)
+  if (!s) return
+  const ov = $('#sess-ov'), sheet = $('#sess-sheet')
+  const titleEl = $('#sess-menu-title')
+  titleEl.textContent = sessTitle(s)
+  // 运行中才显示「停止」
+  $('#sess-a-stop').style.display = s.running ? 'flex' : 'none'
+  $('#sess-rename-box').classList.remove('show')
+  $('#sess-rename-save').classList.remove('show')
+  $('#sess-rename-box').textContent = sessTitle(s)
+  const wire = (id, fn) => { $(id).onclick = fn }
+  wire('#sess-a-rename', () => {
+    vibrate(8)
+    $('#sess-rename-box').classList.add('show')
+    $('#sess-rename-save').classList.add('show')
+    $('#sess-rename-box').focus()
+  })
+  wire('#sess-rename-save', async () => {
+    const t = $('#sess-rename-box').textContent.trim()
+    if (!t) { toast('标题不能为空', true); return }
+    vibrate(8)
+    try {
+      await rpc('session/rename', { request: { sessionId: sid, title: t } })
+      s.title = t
+      closeSessionMenu()
+      renderList()
+      toast('已重命名 ✓')
+    } catch (e) { toast('重命名失败：' + e.message, true) }
+  })
+  wire('#sess-a-fork', async () => {
+    vibrate(8)
+    try {
+      closeSessionMenu()
+      toast('正在分叉…')
+      const v = await rpc('session/fork', { request: { sessionId: sid } })
+      toast('已分叉 ✓ 正在打开')
+      location.hash = '#/s/' + v.sessionId
+    } catch (e) { toast('分叉失败：' + e.message, true) }
+  })
+  wire('#sess-a-archive', async () => {
+    vibrate(8)
+    try {
+      await rpc('workspace/archiveSession', { request: { sessionId: sid } })
+      S.sessions.delete(sid)
+      closeSessionMenu()
+      renderList()
+      toast('已归档（可在桌面端恢复）')
+    } catch (e) { toast('归档失败：' + e.message, true) }
+  })
+  wire('#sess-a-stop', async () => {
+    vibrate(8)
+    try {
+      await rpc('session/cancel', { request: { sessionId: sid } })
+      s.running = false
+      closeSessionMenu()
+      renderList()
+      toast('已发送停止 ■')
+    } catch (e) { toast(e.message, true) }
+  })
+  ov.classList.add('open'); sheet.classList.add('open')
+}
+function closeSessionMenu() {
+  $('#sess-ov').classList.remove('open')
+  $('#sess-sheet').classList.remove('open')
 }
 function refreshBadges() {
   // 待办 chip：有待办才出现（替代被删除的底栏待办 tab）
@@ -2194,6 +2286,18 @@ function buildShell() {
       <button class="q-save" id="q-save" type="button">保存修改</button>
     </div>
   </div>
+  <div class="sheet-overlay" id="sess-ov" aria-hidden="true">
+    <div class="sheet q-sheet" id="sess-sheet" role="dialog" aria-label="会话操作">
+      <div class="grabber"></div>
+      <div class="sess-menu-title" id="sess-menu-title"></div>
+      <div class="act-row" id="sess-a-rename"><span class="ic">✏️</span>重命名<span class="sub">改这个会话的标题</span></div>
+      <div class="act-row" id="sess-a-fork"><span class="ic">⑂</span>分叉<span class="sub">复制到新会话继续</span></div>
+      <div class="act-row" id="sess-a-stop"><span class="ic">⏹</span>停止<span class="sub">中断正在运行的任务</span></div>
+      <div class="act-row" id="sess-a-archive"><span class="ic">📦</span>归档<span class="sub">从列表收起（桌面端可恢复）</span></div>
+      <div class="q-edit-box" id="sess-rename-box" contenteditable aria-label="新标题"></div>
+      <button class="q-save" id="sess-rename-save" type="button">保存标题</button>
+    </div>
+  </div>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>`
   // 注入 SVG 图标
   document.querySelectorAll('[data-ic]').forEach((slot) => {
@@ -2387,6 +2491,9 @@ function buildShell() {
   sendBtn.addEventListener('touchcancel', cancelLp)
   // 排队操作单：背景关闭 + 下拽关闭
   $('#q-ov').addEventListener('click', (e) => { if (e.target.id === 'q-ov') closeQSheet() })
+  // 会话长按操作单：初始化 + 背景关闭
+  initSessionLongPress($('#list-scroll'))
+  $('#sess-ov').addEventListener('click', (e) => { if (e.target.id === 'sess-ov') closeSessionMenu() })
 }
 
 /* ================= 启动 ================= */
