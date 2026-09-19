@@ -927,6 +927,7 @@ async function loadBase() {
     for (const item of list.items || []) {
       const s = sess(item.sessionId)
       s.subagent = item.origin === 'subagent'
+      if (item.parentSessionId) s.parentSessionId = item.parentSessionId  // 子代理 follow 需要父地址
       if (s.subagent) continue
       s.updatedAt = item.updatedAt || 0
       s.running = !!item.running
@@ -944,12 +945,15 @@ async function loadBase() {
   }
 }
 /* 历史加载：打开（或重开）follow 流，等首帧 snapshot 折叠完成 */
-function loadHistory(s) {
+async function loadHistory(s) {
+  // 子代理会话且父地址未知：先刷一次列表拿 parentSessionId，否则 follow 必报 agent-busy
+  if (s.subagent && !s.parentSessionId) await loadBase().catch(() => {})
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => { s._resolveLoad = null; reject(new Error('加载超时')) }, 12000)
+    const timer = setTimeout(() => { s._resolveLoad = null; s._rejectLoad = null; reject(new Error('加载超时')) }, 12000)
     s._resolveLoad = () => { clearTimeout(timer); resolve() }
+    s._rejectLoad = (err) => { clearTimeout(timer); s._resolveLoad = null; reject(err) }
     if (!Mux.setFollow(s.id, true)) {
-      clearTimeout(timer); s._resolveLoad = null
+      clearTimeout(timer); s._resolveLoad = null; s._rejectLoad = null
       reject(new Error('连接不可用，请稍后重试'))
     }
   })
@@ -959,7 +963,7 @@ async function loadEarlier(s) {
   // 记录当前视口锚点：插入旧消息后按滚动高度差恢复，避免阅读位置跳变
   const sc = chatScrollEl()
   const prevGap = sc ? sc.scrollHeight - sc.scrollTop : 0
-  const v = await rpc('session/page', { request: { address: { kind: 'session', sessionId: s.id }, throughSeq: s.oldestSeq - 1, maxMessages: 40 } })
+  const v = await rpc('session/page', { request: { address: followAddress(s.id), throughSeq: s.oldestSeq - 1, maxMessages: 40 } })
   const older = []
   const tmp = { items: older, callArgs: s.callArgs, live: null }
   for (const rec of v.records || []) foldEvent(tmp, rec.event || rec)
@@ -1021,9 +1025,12 @@ const Mux = {
         if (h) { try { h(m.value, meta) } catch (e) { console.error('mux handler', e) } }
       } else if (m.type === 'error') {
         this.streams.delete(m.streamId)
-        if (meta.kind === 'follow' && meta.sessionId && S.current === meta.sessionId) {
-          const msg = m.error && m.error.message
-          if (msg) toast('会话流错误：' + msg, true)
+        if (meta.kind === 'follow' && meta.sessionId) {
+          const msg = (m.error && m.error.message) || '会话流错误'
+          const fs2 = sess(meta.sessionId)
+          // follow 流被宿主拒绝（如地址错误）：立刻结束「加载中」并给出可见的可重试错误态
+          if (fs2._rejectLoad) fs2._rejectLoad(new Error(msg))
+          if (S.current === meta.sessionId) toast('会话流错误：' + msg, true)
         }
       } else if (m.type === 'end') {
         this.streams.delete(m.streamId)
@@ -1046,7 +1053,7 @@ const Mux = {
   openAll() {
     this.open('control', 'session/control', {})
     this.open('events', '$events', {})
-    if (this.followId) this.open('follow', 'session/follow', { request: { address: { kind: 'session', sessionId: this.followId }, assistantStream: true } }, { sessionId: this.followId })
+    if (this.followId) this.open('follow', 'session/follow', { request: { address: followAddress(this.followId), assistantStream: true } }, { sessionId: this.followId })
   },
   /* 切换/重开 follow 流；force=true 时即使目标相同也重开（重取 snapshot） */
   setFollow(sessionId, force) {
@@ -1059,7 +1066,7 @@ const Mux = {
     }
     this.followId = sessionId
     if (!sessionId) return true
-    return !!this.open('follow', 'session/follow', { request: { address: { kind: 'session', sessionId }, assistantStream: true } }, { sessionId })
+    return !!this.open('follow', 'session/follow', { request: { address: followAddress(sessionId), assistantStream: true } }, { sessionId })
   },
   reconnect() {
     if (this.ws && this.ws.readyState <= 1) return
@@ -1067,6 +1074,14 @@ const Mux = {
     try { this.ws && this.ws.close() } catch (e) {}
     this.connect()
   },
+}
+/* follow 地址：子代理会话必须用父地址，否则宿主报 agent-busy（修「点进去什么都看不见」） */
+function followAddress(id) {
+  const s = S.sessions.get(id)
+  if (s && s.subagent && s.parentSessionId) {
+    return { kind: 'subagent', parentSessionId: s.parentSessionId, childSessionId: id, mode: 'continuable' }
+  }
+  return { kind: 'session', sessionId: id }
 }
 /* 投影统一落地（title/permissions/modelSelection/imageLimits） */
 function applyProjection(s, values) {
