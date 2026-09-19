@@ -97,6 +97,20 @@ function dayLabel(ts) {
   return d.getFullYear() !== now.getFullYear() ? d.getFullYear() + '年' + md : md
 }
 
+/* 裸 URL → 可点 <a>（点按拉起系统浏览器）。
+ * 跳过 [文字](链接) 语法内的地址和 `行内代码` 里的地址（负向后顾；
+ * 老浏览器不支持 lookbehind 时降级，仅损失这两个边界情形）。 */
+let BARE_URL_RE
+try { BARE_URL_RE = new RegExp('(?<!\\]\\()(?<!`)(https?:\\/\\/[^\\s<>"\')\\]`]+)', 'g') }
+catch (e) { BARE_URL_RE = /(https?:\/\/[^\s<>"')\]`]+)/g }
+function anchorize(u) {
+  return '<a href="' + u + '" target="_blank" rel="noopener">' + u + '</a>'
+}
+/* 用户气泡专用：转义 + 裸 URL 转链接（保留换行交给 CSS pre-wrap） */
+function linkifyText(text) {
+  return esc(text).replace(BARE_URL_RE, anchorize)
+}
+
 /* 极简 markdown：代码块/行内码/粗体/斜体/链接/标题/列表/引用/表格降级 */
 function md(src) {
   const blocks = []
@@ -105,6 +119,8 @@ function md(src) {
     return '' + (blocks.length - 1) + ''
   })
   s = esc(s)
+  // 裸 URL 自动转可点链接（在 md 链接语法之前；排除 ) ] 引号等，不吞 [text](url) 里的地址）
+  s = s.replace(BARE_URL_RE, anchorize)
   s = s.replace(/`([^`\n]+)`/g, '<code>$1</code>')
   s = s.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
   s = s.replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
@@ -672,7 +688,7 @@ function itemNode(s, item) {
     case 'user': {
       const m = el('div', 'msg user')
       const b = el('div', 'bubble' + (item.pending ? ' pending' : '') + (item.failed ? ' failed' : ''))
-      if (item.text) b.appendChild(document.createTextNode(item.text))
+      if (item.text) b.innerHTML = linkifyText(item.text)  // 裸 URL 可点；换行由 pre-wrap 保留
       if (item.images) for (const img of item.images) {
         if (img.previewUrl) { const im = el('img', 'msg-img'); im.src = im.previewUrl || img.previewUrl; im.alt = img.name || '图片'; b.appendChild(im) }
         else if (img.attachmentId) b.appendChild(attachImgEl(s, img))
@@ -2259,8 +2275,17 @@ function buildShell() {
     const sc = chatScrollEl()
     if (sc && nearBottom(sc)) hideNewMsgPill()
   }, { passive: true })
-  // 聊天区点击委派：代码块复制 / 图片放大
+  // 聊天区点击委派：代码块复制 / 链接拉起浏览器 / 图片放大
   $('#chat-scroll').addEventListener('click', (e) => {
+    const a = e.target.closest && e.target.closest('a[href]')
+    if (a) {
+      e.preventDefault()
+      vibrate(6)
+      // iOS 独立模式下 target=_blank 不可靠：window.open 才能稳定拉起 Safari/默认浏览器
+      const w = window.open(a.href, '_blank', 'noopener')
+      if (!w) toast('若未打开浏览器，请长按链接复制后访问')
+      return
+    }
     const cp = e.target.closest && e.target.closest('.code-copy')
     if (cp) {
       const pre = cp.parentElement && cp.parentElement.querySelector('pre')
