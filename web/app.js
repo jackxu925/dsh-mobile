@@ -24,6 +24,40 @@ const uuid = () => crypto.randomUUID ? crypto.randomUUID() :
 const tz = () => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone } catch (e) { return undefined } }
 const vibrate = (ms) => { try { if (navigator.vibrate) navigator.vibrate(ms) } catch (e) {} }
 
+/* ---- 内联 SVG 图标（SF Symbols 风格线性字形；emoji 是"套壳感"来源） ---- */
+const SVG_OPEN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">'
+const ICONS = {
+  chat: SVG_OPEN + '<path d="M21 11.5a8.5 8.5 0 0 1-8.5 8.5c-1.5 0-3-.4-4.2-1.1L3 20l1.1-5.3A8.5 8.5 0 1 1 21 11.5z"/></svg>',
+  bolt: SVG_OPEN + '<path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z"/></svg>',
+  plus: SVG_OPEN + '<path d="M12 5v14M5 12h14"/></svg>',
+  back: SVG_OPEN + '<path d="m15 18-6-6 6-6"/></svg>',
+  more: '<svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.9"/><circle cx="12" cy="12" r="1.9"/><circle cx="19" cy="12" r="1.9"/></svg>',
+  send: SVG_OPEN + '<path d="M12 19V5M5 12l7-7 7 7"/></svg>',
+  stop: '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="7" y="7" width="10" height="10" rx="2"/></svg>',
+  folder: SVG_OPEN + '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/></svg>',
+  warn: SVG_OPEN + '<path d="M12 3 2.5 20h19L12 3z"/><path d="M12 9.5v5"/><circle cx="12" cy="17.2" r=".5" fill="currentColor"/></svg>',
+  ask: SVG_OPEN + '<path d="M21 11.5a8.5 8.5 0 0 1-8.5 8.5c-1.5 0-3-.4-4.2-1.1L3 20l1.1-5.3A8.5 8.5 0 1 1 21 11.5z"/><path d="M9.3 9a2.8 2.8 0 0 1 5.5.7c0 1.8-2.3 2.2-2.3 3.8"/><circle cx="12.4" cy="16.6" r=".5" fill="currentColor"/></svg>',
+  terminal: SVG_OPEN + '<path d="m4 17 6-5-6-5M12 19h8"/></svg>',
+  file: SVG_OPEN + '<path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9l-6-6z"/><path d="M14 3v6h6"/></svg>',
+  pencil: SVG_OPEN + '<path d="M17 3a2.8 2.8 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>',
+  search: SVG_OPEN + '<circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>',
+  todo: SVG_OPEN + '<path d="m3 6 2 2 4-4M3 16l2 2 4-4M13 6h8M13 16h8"/></svg>',
+  robot: SVG_OPEN + '<rect x="4" y="8" width="16" height="12" rx="2"/><path d="M12 8V4M8 4h8"/><circle cx="9" cy="13" r="1" fill="currentColor" stroke="none"/><circle cx="15" cy="13" r="1" fill="currentColor" stroke="none"/></svg>',
+  globe: SVG_OPEN + '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a13.5 13.5 0 0 1 0 18M12 3a13.5 13.5 0 0 0 0 18"/></svg>',
+  wrench: SVG_OPEN + '<path d="M14.7 6.3a4.5 4.5 0 0 0-6 6L3 18l3 3 5.7-5.7a4.5 4.5 0 0 0 6-6L14 13l-3-3 3.7-3.7z"/></svg>',
+  sliders: SVG_OPEN + '<path d="M4 8h16M4 16h16"/><circle cx="9" cy="8" r="2.2"/><circle cx="15" cy="16" r="2.2"/></svg>',
+  lock: SVG_OPEN + '<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>',
+}
+const icon = (name, size) => {
+  const s = document.createElement('span')
+  s.className = 'ic'
+  s.style.width = (size || 20) + 'px'
+  s.style.height = (size || 20) + 'px'
+  s.setAttribute('aria-hidden', 'true')
+  s.innerHTML = ICONS[name] || ICONS.wrench
+  return s
+}
+
 function fmtTime(ts) {
   if (!ts) return ''
   const d = new Date(ts), now = new Date()
@@ -58,7 +92,6 @@ function md(src) {
     const line = raw
     const blk = line.match(/^(\d+)$/)
     if (blk) { flushPara(); flushList(); flushTable(); html += blocks[+blk[1]]; continue }
-    // 表格：连续的 | 开头行收拢为等宽横滚块（保留对齐）
     if (/^\s*\|.*\|\s*$/.test(line)) { flushPara(); flushList(); table.push(line); continue }
     flushTable()
     const h = line.match(/^(#{1,4})\s+(.*)$/)
@@ -148,8 +181,8 @@ function sess(id) {
       callArgs: new Map(),             // callId → {name, args}
       lastPreview: '',
       permissions: null,               // {options:[{value,name,description?}], currentValue}
-      models: null,                    // session.models 缓存 {current, groups, failures, routable}
-      imageLimits: null,               // imageLimits 投影 {maxImageBytes, ...}
+      models: null,                    // session.models 缓存
+      imageLimits: null,               // imageLimits 投影
     }
     S.sessions.set(id, s)
   }
@@ -303,7 +336,6 @@ function foldEvent(s, event, view) {
       break
     }
     case 'todo/write': {
-      // 只保留最新一份
       for (let i = s.items.length - 1; i >= 0; i--) if (s.items[i].kind === 'todo') { s.items.splice(i, 1); break }
       if (Array.isArray(d.todos) && d.todos.length) s.items.push({ kind: 'todo', todos: d.todos, time: event.time })
       break
@@ -335,7 +367,7 @@ function endLive(s, turn, step) {
 }
 
 /* ================= 渲染：工具卡 ================= */
-const TOOL_ICONS = { bash: '⌘', read: '📄', write: '✏️', edit: '✏️', glob: '🔍', grep: '🔍', todo_write: '☑', subagent: '🤖', web_search: '🌐', web_fetch: '🌐' }
+const TOOL_ICONS = { bash: 'terminal', read: 'file', write: 'pencil', edit: 'pencil', glob: 'search', grep: 'search', todo_write: 'todo', subagent: 'robot', web_search: 'globe', web_fetch: 'globe' }
 function toolSummary(item) {
   const a = item.args || {}
   const pick = a.command || a.file_path || a.path || a.pattern || a.query || a.url || a.description || a.label || a.objective
@@ -346,7 +378,8 @@ function toolNode(item) {
   const card = el('div', 'tool-card')
   const head = el('div', 'tool-head')
   head.setAttribute('role', 'button')
-  const ico = el('div', 'tool-ico', TOOL_ICONS[item.name] || '🔧')
+  const ico = el('div', 'tool-ico')
+  ico.appendChild(icon(TOOL_ICONS[item.name] || 'wrench', 15))
   const mid = el('div'); mid.style.minWidth = '0'; mid.style.flex = '1'
   mid.appendChild(el('div', 'tool-name', item.name))
   mid.appendChild(el('div', 'tool-sum', toolSummary(item)))
@@ -370,7 +403,8 @@ function toolNode(item) {
 function approvalNode(s, a) {
   const card = el('div', 'approval-card')
   const head = el('div', 'approval-head')
-  head.appendChild(el('div', 'a-ico', '⚠️'))
+  const ico = el('div', 'a-ico'); ico.appendChild(icon('warn', 17))
+  head.appendChild(ico)
   const ht = el('div')
   ht.appendChild(el('div', 'a-title', a.toolName + ' 请求你的批准'))
   ht.appendChild(el('div', 'a-sub', a.outcome ? '已处理' : '等待你的决定'))
@@ -415,7 +449,8 @@ function questionNode(s, q) {
   const card = el('div', 'ask-card')
   card.id = 'q-' + cssId(q.rpcId)
   const head = el('div', 'approval-head')
-  head.appendChild(el('div', 'a-ico', '🤔'))
+  const ico = el('div', 'a-ico'); ico.appendChild(icon('ask', 17))
+  head.appendChild(ico)
   const ht = el('div')
   ht.appendChild(el('div', 'a-title', 'Agent 提问'))
   ht.appendChild(el('div', 'a-sub', q.outcome ? '已处理' : '等待你的回答'))
@@ -456,7 +491,6 @@ function questionNode(s, q) {
       row.dataset.qi = qi
       card.appendChild(row)
     })
-    // 自定义输入
     const customWrap = el('div', 'ask-custom')
     const input = el('input')
     input.placeholder = multi ? '补充说明（可选）' : '或输入自定义回答…'
@@ -500,6 +534,14 @@ function rerenderQuestion(s, q) {
 function chatScrollEl() { return $('#chat-scroll') }
 function nearBottom(sc) { return sc.scrollHeight - sc.scrollTop - sc.clientHeight < 120 }
 function scrollBottom(sc, force) { if (force || nearBottom(sc)) sc.scrollTop = sc.scrollHeight }
+
+function skeletonNode() {
+  const w = el('div', 'sk-wrap')
+  w.appendChild(el('div', 'sk-bubble sk-user'))
+  w.appendChild(el('div', 'sk-bubble sk-bot'))
+  w.appendChild(el('div', 'sk-bubble sk-bot w60'))
+  return w
+}
 
 function renderChat(s, forceScroll) {
   if (S.current !== s.id) return
@@ -569,7 +611,11 @@ function itemNode(s, item) {
       const c = el('div', 'todo-card')
       item.todos.forEach((t) => {
         const row = el('div', 't-row')
-        row.appendChild(el('span', 't-ico', t.status === 'completed' ? '✅' : t.status === 'in_progress' ? '🔄' : '⬜'))
+        const ico = el('span', 't-ico')
+        if (t.status === 'completed') { ico.textContent = '✓'; ico.style.color = 'var(--green)' }
+        else if (t.status === 'in_progress') { ico.textContent = '▸'; ico.style.color = '#6aa6ff' }
+        else { ico.textContent = '○'; ico.style.color = 'var(--text-3)' }
+        row.appendChild(ico)
         const txt = el('span', t.status === 'completed' ? 't-done' : '', t.content)
         row.appendChild(txt)
         c.appendChild(row)
@@ -641,11 +687,11 @@ function renderList() {
   if (S.todoMode) {
     visible = visible.filter(hasPending)
     if (!visible.length) {
-      wrap.appendChild(el('div', 'empty-state', '没有待处理的事项 ✅'))
+      wrap.appendChild(el('div', 'empty-state', '没有待处理的事项 ✓'))
       return
     }
     const g = el('div', 'ws-group')
-    g.appendChild(el('span', 'ws-ico', '⚡'))
+    g.appendChild(icon('bolt', 14))
     g.appendChild(el('span', null, '待处理（' + visible.length + '）'))
     wrap.appendChild(g)
     for (const s of visible) wrap.appendChild(sessionCard(s))
@@ -663,18 +709,18 @@ function renderList() {
     wrap.appendChild(el('div', 'empty-state', '还没有会话\n点下方「新会话」开始'))
     return
   }
-  const renderGroup = (name, icon, list) => {
+  const renderGroup = (name, iconName, list) => {
     const g = el('div', 'ws-group')
-    g.appendChild(el('span', 'ws-ico', icon))
+    g.appendChild(icon(iconName, 14))
     g.appendChild(el('span', null, name))
     wrap.appendChild(g)
     for (const s of list) wrap.appendChild(sessionCard(s))
   }
   for (const ws of S.workspaces) {
     const list = byWs.get(ws.workspaceId)
-    if (list && list.length) renderGroup(ws.title || ws.path, '📁', list)
+    if (list && list.length) renderGroup(ws.title || ws.path, 'folder', list)
   }
-  if (ungrouped.length) renderGroup(S.workspaces.length ? '其他' : '会话', '💬', ungrouped)
+  if (ungrouped.length) renderGroup(S.workspaces.length ? '其他' : '会话', 'chat', ungrouped)
 }
 function sessionCard(s) {
   const card = el('div', 'session-card')
@@ -763,7 +809,7 @@ async function loadEarlier(s) {
   toast('已加载 ' + older.length + ' 条')
 }
 
-/* ================= 实时流（WebSocket 下行，与服务端 /api 协议一致） ================= */
+/* ================= 实时流（WebSocket 下行） ================= */
 function setConn(state) {
   S.connState = state
   const pill = $('#conn-pill')
@@ -810,7 +856,7 @@ function startMux() {
     for (const s of S.sessions.values()) { s.approvals.clear(); s.questions.clear() }
     setConn('online')
     loadBase()
-    if (S.current) openSession(S.current, true)
+    if (S.current) reloadCurrent()
   })
 }
 function handleMux(rpcId, p) {
@@ -898,19 +944,45 @@ function startHostStream() {
   }, null)
 }
 
-/* ================= 视图 / 路由 ================= */
+/* ================= 视图 / 路由（chat 覆盖层 + push 转场） ================= */
+function chatView() { return $('#view-chat') }
+function enterChat() {
+  const v = chatView()
+  if (!v || v.classList.contains('active')) return
+  v.style.transform = 'translateX(100%)'
+  v.classList.add('active')
+  void v.offsetWidth  // force reflow，让 transition 从 100% 播到 0
+  v.style.transform = ''
+}
+function leaveChat() {
+  const v = chatView()
+  if (!v || !v.classList.contains('active')) return
+  v.classList.add('closing')
+  v.classList.remove('active')
+  setTimeout(() => { v.classList.remove('closing'); v.style.transform = '' }, 300)
+}
 function showView(name) {
-  document.querySelectorAll('.view').forEach((v) => v.classList.remove('active'))
-  $('#view-' + name).classList.add('active')
+  // chat 是覆盖层：list/new 在底层互斥切换，chat 有自己的进出动画
+  if (name === 'chat') {
+    if (!$('#view-list').classList.contains('active') && !$('#view-new').classList.contains('active')) {
+      $('#view-list').classList.add('active')
+    }
+    enterChat()
+  } else {
+    document.querySelectorAll('.view').forEach((v) => { if (v.id !== 'view-chat') v.classList.remove('active') })
+    $('#view-' + name).classList.add('active')
+    leaveChat()
+  }
   updateTabs()
 }
 function updateTabs() {
+  const h = location.hash || '#/'
   document.querySelectorAll('.tabbar .tab').forEach((t) => {
     const tab = t.dataset.tab
     t.classList.toggle('on',
-      (tab === 'sessions' && !S.todoMode && !S.current) ||
-      (tab === 'todo' && S.todoMode) ||
-      (tab === 'new' && location.hash === '#/new'))
+      (tab === 'sessions' && !S.todoMode && h === '#/') ||
+      (tab === 'todo' && S.todoMode && h === '#/') ||
+      (tab === 'new' && h === '#/new'))
   })
 }
 async function openSession(id, force) {
@@ -922,10 +994,7 @@ async function openSession(id, force) {
   const sc = chatScrollEl()
   sc.textContent = ''
   if (!s.loaded || force) {
-    const loading = el('div', 'empty-state')
-    loading.appendChild(el('span', 'spinner'))
-    loading.appendChild(document.createTextNode(' 加载中…'))
-    sc.appendChild(loading)
+    sc.appendChild(skeletonNode())
     try { await loadHistory(s) } catch (e) {
       sc.textContent = ''
       const d = el('div', 'empty-state', '加载失败：' + e.message)
@@ -939,6 +1008,12 @@ async function openSession(id, force) {
   }
   renderChat(s, true)
   refreshChatChrome(s)
+}
+function reloadCurrent() {
+  // 重连后的强制刷新：保留在 chat 视图（不重复进入动画）
+  if (!S.current) return
+  const s = sess(S.current)
+  loadHistory(s).then(() => renderChat(s)).catch(() => {})
 }
 function refreshChatChrome(s) {
   const off = S.connState !== 'online'
@@ -963,6 +1038,77 @@ function route() {
   renderList()
 }
 
+/* ================= 手势：右滑返回 / sheet 下拽关闭 ================= */
+function initSwipeBack() {
+  const v = chatView()
+  let maybe = false, tracking = false, sx = 0, sy = 0, dx = 0
+  v.addEventListener('touchstart', (e) => {
+    if (!S.current) return
+    if (e.touches[0].clientX <= 24) { maybe = true; tracking = false; sx = e.touches[0].clientX; sy = e.touches[0].clientY; dx = 0 }
+  }, { passive: true })
+  v.addEventListener('touchmove', (e) => {
+    if (!maybe) return
+    const mx = e.touches[0].clientX - sx, my = e.touches[0].clientY - sy
+    if (!tracking) {
+      if (Math.abs(my) > Math.abs(mx) * 1.2) { maybe = false; return }  // 垂直滚动优先
+      if (mx > 8) { tracking = true; v.classList.add('instant') } else return
+    }
+    dx = Math.max(0, mx)
+    v.style.transform = 'translateX(' + dx + 'px)'
+    if (e.cancelable) e.preventDefault()
+  }, { passive: false })
+  const finish = () => {
+    if (!maybe) return
+    maybe = false
+    if (!tracking) return
+    tracking = false
+    v.classList.remove('instant')
+    if (dx > 72) {
+      // 顺势滑出，完成后真正离开
+      v.style.transform = 'translateX(100%)'
+      setTimeout(() => {
+        v.classList.remove('active')
+        v.style.transform = ''
+        if (S.current) { S.current = null; location.hash = '#/'; renderList() }
+      }, 240)
+    } else {
+      v.style.transform = ''
+    }
+    dx = 0
+  }
+  v.addEventListener('touchend', finish)
+  v.addEventListener('touchcancel', finish)
+}
+function initSheetDrag() {
+  const sheet = $('#sheet-overlay .sheet')
+  const content = $('#sheet-content')
+  let dragging = false, startY = 0, dy = 0
+  sheet.addEventListener('touchstart', (e) => {
+    const fromGrabber = !!e.target.closest('.grabber')
+    if (fromGrabber || content.scrollTop <= 0) { dragging = true; startY = e.touches[0].clientY; dy = 0 }
+  }, { passive: true })
+  sheet.addEventListener('touchmove', (e) => {
+    if (!dragging) return
+    dy = Math.max(0, e.touches[0].clientY - startY)
+    if (dy > 0) {
+      sheet.classList.add('dragging')
+      sheet.style.transform = 'translateY(' + dy + 'px)'
+      if (e.cancelable) e.preventDefault()
+    }
+  }, { passive: false })
+  const finish = () => {
+    if (!dragging) return
+    dragging = false
+    sheet.classList.remove('dragging')
+    const shouldClose = dy > 110
+    sheet.style.transform = ''
+    if (shouldClose) closeSheet()
+    dy = 0
+  }
+  sheet.addEventListener('touchend', finish)
+  sheet.addEventListener('touchcancel', finish)
+}
+
 /* ================= 新会话 ================= */
 let newSel = null
 let newPreset = null
@@ -977,7 +1123,8 @@ async function renderNew() {
   if (!newSel || !S.workspaces.find((w) => w.workspaceId === newSel)) newSel = S.workspaces[0].workspaceId
   for (const w of S.workspaces) {
     const row = el('div', 'pick-ws' + (w.workspaceId === newSel ? ' sel' : ''))
-    row.appendChild(el('div', 'ws-ico', '📁'))
+    const wi = el('div', 'ws-ico'); wi.appendChild(icon('folder', 17))
+    row.appendChild(wi)
     const mid = el('div'); mid.style.minWidth = '0'
     mid.appendChild(el('div', 'ws-name', w.title || w.path))
     mid.appendChild(el('div', 'ws-path', w.path))
@@ -1057,7 +1204,6 @@ async function sendPrompt(id, text, images) {
   }
 }
 function retrySend(s, item) {
-  // 移除失败项，用同样的内容重新发一条（新的 rpcId）
   const i = s.items.indexOf(item)
   if (i >= 0) s.items.splice(i, 1)
   sendPrompt(s.id, item.text, item.images)
@@ -1106,7 +1252,8 @@ function renderSheet(s) {
   if (!c) return
   c.textContent = ''
   // ---- 模型 ----
-  c.appendChild(el('div', 'sheet-sec', '🧠 模型'))
+  const mSec = el('div', 'sheet-sec'); mSec.appendChild(icon('sliders', 14)); mSec.appendChild(el('span', null, '模型'))
+  c.appendChild(mSec)
   const m = s.models
   if (!m) c.appendChild(el('div', 'sheet-note', '加载中…'))
   else if (m.error) c.appendChild(el('div', 'sheet-note', '加载失败：' + m.error))
@@ -1118,7 +1265,8 @@ function renderSheet(s) {
     for (const f of m.failures || []) c.appendChild(el('div', 'sheet-note', '⚠️ ' + f.name + '：' + f.message))
   }
   // ---- 权限 ----
-  c.appendChild(el('div', 'sheet-sec', '🔒 权限'))
+  const pSec = el('div', 'sheet-sec'); pSec.appendChild(icon('lock', 14)); pSec.appendChild(el('span', null, '权限'))
+  c.appendChild(pSec)
   const perms = s.permissions
   if (!perms) c.appendChild(el('div', 'sheet-note', '暂不可用（会话历史加载后显示）'))
   else for (const opt of perms.options) c.appendChild(permRow(s, opt, perms.currentValue))
@@ -1220,26 +1368,26 @@ function buildShell() {
       <div id="session-list"></div>
     </div>
     <div class="tabbar">
-      <button class="tab on" data-tab="sessions" id="tab-sessions" aria-label="会话"><span class="ico" aria-hidden="true">💬</span>会话</button>
-      <button class="tab" data-tab="todo" id="tab-todo" aria-label="待办"><span class="ico" aria-hidden="true">⚡<span class="n" id="tab-badge" style="display:none">0</span></span>待办</button>
-      <button class="tab" data-tab="new" id="tab-new" aria-label="新会话"><span class="ico" aria-hidden="true">＋</span>新会话</button>
+      <button class="tab on" data-tab="sessions" id="tab-sessions" aria-label="会话"><span class="ico" data-ic="chat"></span>会话</button>
+      <button class="tab" data-tab="todo" id="tab-todo" aria-label="待办"><span class="ico" data-ic="bolt"><span class="n" id="tab-badge" style="display:none">0</span></span>待办</button>
+      <button class="tab" data-tab="new" id="tab-new" aria-label="新会话"><span class="ico" data-ic="plus"></span>新会话</button>
     </div>
   </div>
   <div class="view" id="view-chat">
     <div class="navbar"><div class="bar">
-      <button class="nav-btn back" id="chat-back" aria-label="返回">‹</button>
+      <button class="nav-btn back" id="chat-back" aria-label="返回"><span class="ic-slot" data-ic="back"></span></button>
       <div class="title"><span id="chat-title"></span><div class="subtitle" id="chat-sub"></div></div>
-      <button class="nav-btn" id="chat-more" aria-label="会话设置">⋯</button>
+      <button class="nav-btn" id="chat-more" aria-label="会话设置"><span class="ic-slot" data-ic="more"></span></button>
     </div></div>
     <div class="chat-scroll" id="chat-scroll"></div>
     <div class="composer-wrap">
-      <div class="running-bar" id="running-bar"><span>●</span> Agent 正在工作…<button class="stop" id="stop-btn" aria-label="停止当前任务">■ 停止</button></div>
+      <div class="running-bar" id="running-bar"><span>●</span> Agent 正在工作…<button class="stop" id="stop-btn" aria-label="停止当前任务"><span class="ic-slot" data-ic="stop"></span>停止</button></div>
       <div class="attach-strip" id="attach-strip"></div>
       <div class="composer">
-        <button class="c-btn" id="attach-btn" aria-label="添加图片">＋</button>
+        <button class="c-btn" id="attach-btn" aria-label="添加图片"><span class="ic-slot" data-ic="plus"></span></button>
         <input type="file" id="attach-input" accept="image/png,image/jpeg,image/webp,image/gif" multiple style="display:none">
         <div class="input-box" id="chat-input" contenteditable data-ph="发消息…" aria-label="消息输入框"></div>
-        <button class="send" id="send-btn" aria-label="发送">↑</button>
+        <button class="send" id="send-btn" aria-label="发送"><span class="ic-slot" data-ic="send"></span></button>
       </div>
     </div>
   </div>
@@ -1249,11 +1397,11 @@ function buildShell() {
       <button class="nav-btn" id="new-cancel">取消</button>
     </div></div>
     <div class="scroll">
-      <div class="ws-group"><span class="ws-ico">📂</span><span>选择工作区</span></div>
+      <div class="ws-group" id="ws-group-h"></div>
       <div id="new-ws-list"></div>
-      <div class="ws-group"><span class="ws-ico">🤖</span><span>Agent 预设</span></div>
+      <div class="ws-group" id="preset-group-h"></div>
       <div class="preset-row" id="preset-row"></div>
-      <div class="ws-group"><span class="ws-ico">✨</span><span>说点什么开始（可留空）</span></div>
+      <div class="ws-group" id="new-input-h"></div>
       <div class="new-input" id="new-input" contenteditable data-ph="帮我把 …" aria-label="首条消息"></div>
       <button class="start-btn" id="start-btn">开始会话</button>
     </div>
@@ -1265,6 +1413,15 @@ function buildShell() {
     </div>
   </div>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>`
+  // 注入 SVG 图标
+  document.querySelectorAll('[data-ic]').forEach((slot) => {
+    const size = slot.closest('.tab') ? 22 : slot.closest('.nav-btn') ? 24 : slot.closest('.stop') ? 12 : 18
+    slot.appendChild(icon(slot.dataset.ic, size))
+  })
+  const gh = (id, ic, text) => { const g = $(id); g.appendChild(icon(ic, 14)); g.appendChild(el('span', null, text)) }
+  gh('#ws-group-h', 'folder', '选择工作区')
+  gh('#preset-group-h', 'robot', 'Agent 预设')
+  gh('#new-input-h', 'chat', '说点什么开始（可留空）')
   $('#search').addEventListener('input', renderList)
   $('#chat-back').onclick = () => { location.hash = '#/' }
   $('#chat-more').onclick = () => { if (S.current) openSheet(sess(S.current)) }
@@ -1276,6 +1433,8 @@ function buildShell() {
   $('#start-btn').onclick = startSession
   $('#stop-btn').onclick = () => S.current && cancelSession(S.current)
   initPtr($('#list-scroll'))
+  initSwipeBack()
+  initSheetDrag()
   // 图片附件
   let pendingImages = []
   const strip = $('#attach-strip')
@@ -1312,7 +1471,6 @@ function buildShell() {
     document.execCommand('insertText', false, text)
   })
   input.addEventListener('focus', () => {
-    // 键盘弹起后把对话滚到底
     setTimeout(() => { const sc = chatScrollEl(); if (sc) sc.scrollTop = sc.scrollHeight }, 250)
   })
   input.addEventListener('keydown', (e) => {
