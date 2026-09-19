@@ -1,7 +1,8 @@
 /* DSH Mobile — phone-native surface.
  * Talks to the harness's own /api (same origin, same trust fence as the
  * desktop GUI): unary POST /api/<method>, respond POST /api/respond,
- * live frames over GET /api/events.mux + /api/events.host (SSE).
+ * typert remotes POST /api/<ns>/<method>, live frames over the
+ * /api/events.mux + /api/events.host WebSocket downlinks.
  * Vanilla JS, no build step, no dependencies.
  */
 (function () {
@@ -29,10 +30,10 @@ function fmtTime(ts) {
   const sameDay = d.toDateString() === now.toDateString()
   const hm = d.getHours() + ':' + String(d.getMinutes()).padStart(2, '0')
   if (sameDay) return hm
-  return (d.getMonth() + 1) + '月' + d.getDate() + '日'
+  return (d.getMonth() + 1) + '月' + d.getDate() + '日 ' + hm
 }
 
-/* 极简 markdown：代码块/行内码/粗体/斜体/链接/标题/列表/引用 */
+/* 极简 markdown：代码块/行内码/粗体/斜体/链接/标题/列表/引用/表格降级 */
 function md(src) {
   const blocks = []
   let s = String(src).replace(/```(\w*)\n?([\s\S]*?)(```|$)/g, (m, lang, code) => {
@@ -44,14 +45,22 @@ function md(src) {
   s = s.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
   s = s.replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
   const lines = s.split('\n')
-  let html = '', list = null, para = []
+  let html = '', list = null, para = [], table = []
+  let listItems = ''
   const flushPara = () => { if (para.length) { html += '<p>' + para.join('<br>') + '</p>'; para = [] } }
   const flushList = () => { if (list) { html += '<' + list + '>' + listItems + '</' + list + '>'; list = null; listItems = '' } }
-  let listItems = ''
+  const flushTable = () => {
+    if (table.length >= 2) html += '<span class="md-table">' + table.join('\n') + '</span>'
+    else if (table.length) para.push(...table)
+    table = []
+  }
   for (const raw of lines) {
     const line = raw
     const blk = line.match(/^(\d+)$/)
-    if (blk) { flushPara(); flushList(); html += blocks[+blk[1]]; continue }
+    if (blk) { flushPara(); flushList(); flushTable(); html += blocks[+blk[1]]; continue }
+    // 表格：连续的 | 开头行收拢为等宽横滚块（保留对齐）
+    if (/^\s*\|.*\|\s*$/.test(line)) { flushPara(); flushList(); table.push(line); continue }
+    flushTable()
     const h = line.match(/^(#{1,4})\s+(.*)$/)
     if (h) { flushPara(); flushList(); html += '<h' + (h[1].length + 1) + '>' + h[2] + '</h' + (h[1].length + 1) + '>'; continue }
     const ul = line.match(/^[-*]\s+(.*)$/)
@@ -63,16 +72,16 @@ function md(src) {
     if (line.trim() === '') { flushPara(); flushList(); continue }
     para.push(line)
   }
-  flushPara(); flushList()
+  flushPara(); flushList(); flushTable()
   return html
 }
 
 /* ================= API 层 ================= */
-async function rpc(method, payload) {
+async function rpc(method, payload, rpcId) {
   const r = await fetch('/api/' + method, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ type: 'client-request', rpcId: uuid(), method, payload }),
+    body: JSON.stringify({ type: 'client-request', rpcId: rpcId || uuid(), method, payload }),
   })
   if (!r.ok) throw new Error(method + ': HTTP ' + r.status)
   const full = await r.json()
@@ -119,8 +128,10 @@ const S = {
   workspaces: [],           // [{workspaceId, path, title, sessionIds}]
   archived: new Set(),
   sessions: new Map(),      // id → sess
+  presets: null,            // agentPreset.list 缓存 [{id, name, isDefault}]
   connState: 'connecting',  // connecting | online | offline
   current: null,            // open session id
+  todoMode: false,          // 待办过滤
   es: { mux: null, host: null },
 }
 function sess(id) {
@@ -129,14 +140,16 @@ function sess(id) {
     s = {
       id, title: null, running: false, blank: true, updatedAt: 0, cwd: '', agentPreset: null,
       loaded: false, hasMore: false, oldestSeq: null,
-      items: [],                       // folded chat items
-      live: null,                      // {turn, step, texts:{idx:text}, node}
+      items: [],                       // folded chat items（含乐观上屏的 pending 项）
+      queue: [],                       // session/queue 帧（排队/插话中的消息）
+      live: null,                      // {turn, step, texts:{idx:text}}
       approvals: new Map(),            // approvalId → {rpcId, toolName, callId, reason, outcome}
       questions: new Map(),            // rpcId → {questions, outcome}
       callArgs: new Map(),             // callId → {name, args}
       lastPreview: '',
       permissions: null,               // {options:[{value,name,description?}], currentValue}
       models: null,                    // session.models 缓存 {current, groups, failures, routable}
+      imageLimits: null,               // imageLimits 投影 {maxImageBytes, ...}
     }
     S.sessions.set(id, s)
   }
@@ -150,7 +163,71 @@ const pendingCount = () => {
   }
   return n
 }
+const hasPending = (s) => {
+  for (const a of s.approvals.values()) if (!a.outcome) return true
+  for (const q of s.questions.values()) if (!q.outcome) return true
+  return false
+}
 function sessTitle(s) { return s.title || '新会话' }
+
+/* ================= 图片 ================= */
+const attachCache = new Map()  // attachmentId → dataUrl
+function imageBlocksOf(content) {
+  if (!Array.isArray(content)) return []
+  return content
+    .filter((b) => b && b.type === 'image')
+    .map((b) => ({
+      attachmentId: b.attachment && b.attachment.attachmentId,
+      mediaType: (b.attachment && b.attachment.mediaType) || b.mediaType || 'image/png',
+    }))
+    .filter((b) => b.attachmentId)
+}
+function attachImgEl(s, ref) {
+  const img = el('img', 'msg-img')
+  img.alt = '图片'
+  img.loading = 'lazy'
+  const cached = attachCache.get(ref.attachmentId)
+  if (cached) { img.src = cached; return img }
+  img.style.background = 'var(--bg-card-2)'
+  img.style.minHeight = '80px'
+  rpc('session.attachment', { sessionId: s.id, attachmentId: ref.attachmentId })
+    .then((v) => {
+      const url = 'data:' + (v.attachment.mediaType || ref.mediaType) + ';base64,' + v.data
+      attachCache.set(ref.attachmentId, url)
+      img.src = url
+      img.style.minHeight = ''
+    })
+    .catch(() => { img.remove() })
+  return img
+}
+/* 读取+压缩（长边 1600 / 超限转 jpeg） */
+function fileToImage(file) {
+  return new Promise((resolve, reject) => {
+    if (!/^image\/(png|jpeg|webp|gif)$/.test(file.type)) { reject(new Error('仅支持 png/jpeg/webp/gif 图片')); return }
+    const reader = new FileReader()
+    reader.onerror = () => reject(new Error('读取图片失败'))
+    reader.onload = () => {
+      const img = new Image()
+      img.onload = () => {
+        try {
+          const maxSide = 1600
+          const scale = Math.min(1, maxSide / Math.max(img.width, img.height))
+          let dataUrl = reader.result, mediaType = file.type
+          if (scale < 1 || file.size > 4.5 * 1024 * 1024) {
+            const cv = document.createElement('canvas')
+            cv.width = Math.round(img.width * scale); cv.height = Math.round(img.height * scale)
+            cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height)
+            dataUrl = cv.toDataURL('image/jpeg', 0.82); mediaType = 'image/jpeg'
+          }
+          resolve({ mediaType, data: String(dataUrl).split(',')[1], previewUrl: dataUrl, name: file.name || 'image' })
+        } catch (e) { reject(e) }
+      }
+      img.onerror = () => reject(new Error('图片解析失败'))
+      img.src = reader.result
+    }
+    reader.readAsDataURL(file)
+  })
+}
 
 /* ================= 会话事件折叠 ================= */
 function textOf(content) {
@@ -164,9 +241,20 @@ function foldEvent(s, event, view) {
     case 'user/message': {
       if (d.source && d.source.kind && d.source.kind !== 'user') return  // 注入类上下文不显示
       const text = textOf(d.content)
-      if (!text.trim()) return
-      s.items.push({ kind: 'user', text, time: event.time })
-      s.lastPreview = text
+      const images = imageBlocksOf(d.content)
+      if (!text.trim() && !images.length) return
+      // 乐观上屏去重：同一 rpcId 的消息已上屏则就地转正
+      const rid = d.source && d.source.rpcId
+      if (rid) {
+        const i = s.items.findIndex((x) => x.kind === 'user' && x.rpcId === rid)
+        if (i >= 0) {
+          s.items[i] = { ...s.items[i], text: text || s.items[i].text, images: images.length ? images : s.items[i].images, pending: false, failed: false, time: event.time }
+          s.lastPreview = text || s.lastPreview
+          break
+        }
+      }
+      s.items.push({ kind: 'user', text, images: images.length ? images : null, time: event.time })
+      s.lastPreview = text || '[图片]'
       break
     }
     case 'assistant/message': {
@@ -194,7 +282,7 @@ function foldEvent(s, event, view) {
       let args = {}
       try { args = JSON.parse(d.arguments || '{}') } catch (e) {}
       s.callArgs.set(d.callId, { name: d.name, args })
-      s.items.push({ kind: 'tool', callId: d.callId, name: d.name, args, state: 'run', result: '', view: null, time: event.time })
+      s.items.push({ kind: 'tool', callId: d.callId, name: d.name, args, state: 'run', result: '', time: event.time })
       break
     }
     case 'tool/result': {
@@ -210,7 +298,7 @@ function foldEvent(s, event, view) {
         item.state = d.error ? 'err' : 'ok'
         item.result = text
       } else {
-        s.items.push({ kind: 'tool', callId: callId || null, name: 'tool', args: {}, state: d.error ? 'err' : 'ok', result: text, view: null, time: event.time })
+        s.items.push({ kind: 'tool', callId: callId || null, name: 'tool', args: {}, state: d.error ? 'err' : 'ok', result: text, time: event.time })
       }
       break
     }
@@ -257,6 +345,7 @@ function toolSummary(item) {
 function toolNode(item) {
   const card = el('div', 'tool-card')
   const head = el('div', 'tool-head')
+  head.setAttribute('role', 'button')
   const ico = el('div', 'tool-ico', TOOL_ICONS[item.name] || '🔧')
   const mid = el('div'); mid.style.minWidth = '0'; mid.style.flex = '1'
   mid.appendChild(el('div', 'tool-name', item.name))
@@ -303,13 +392,13 @@ function approvalNode(s, a) {
   deny.onclick = async () => {
     a.outcome = 'rejected'; vibrate(12); rerenderApproval(s, a)
     const ok = await respond(a.rpcId, { sessionId: s.id, approvalId: a.approvalId, outcome: 'rejected' }).catch(() => false)
-    if (!ok) toast('发送失败，请重试', true), a.outcome = null, rerenderApproval(s, a)
+    if (!ok) { toast('发送失败，请重试', true); a.outcome = null; rerenderApproval(s, a) }
     refreshBadges()
   }
   allow.onclick = async () => {
     a.outcome = 'allowed-once'; vibrate(12); rerenderApproval(s, a)
     const ok = await respond(a.rpcId, { sessionId: s.id, approvalId: a.approvalId, outcome: 'allowed-once' }).catch(() => false)
-    if (!ok) toast('发送失败，请重试', true), a.outcome = null, rerenderApproval(s, a)
+    if (!ok) { toast('发送失败，请重试', true); a.outcome = null; rerenderApproval(s, a) }
     refreshBadges()
   }
   btns.append(deny, allow)
@@ -423,7 +512,7 @@ function renderChat(s, forceScroll) {
     more.onclick = () => loadEarlier(s)
     sc.appendChild(more)
   }
-  for (const item of s.items) sc.appendChild(itemNode(item))
+  for (const item of s.items) sc.appendChild(itemNode(s, item))
   renderChatPending(s, sc)
   refreshChatChrome(s)
   scrollBottom(sc, stick)
@@ -439,11 +528,26 @@ function renderListSoon() {
   if (listTimer) return
   listTimer = setTimeout(() => { listTimer = null; renderList() }, 300)
 }
-function itemNode(item) {
+function itemNode(s, item) {
   switch (item.kind) {
     case 'user': {
       const m = el('div', 'msg user')
-      m.appendChild(el('div', 'bubble', item.text))
+      const b = el('div', 'bubble' + (item.pending ? ' pending' : '') + (item.failed ? ' failed' : ''))
+      if (item.text) b.appendChild(document.createTextNode(item.text))
+      if (item.images) for (const img of item.images) {
+        if (img.previewUrl) { const im = el('img', 'msg-img'); im.src = img.previewUrl; im.alt = img.name || '图片'; b.appendChild(im) }
+        else if (img.attachmentId) b.appendChild(attachImgEl(s, img))
+      }
+      m.appendChild(b)
+      const meta = el('div', 'm-meta')
+      meta.appendChild(el('span', null, fmtTime(item.time)))
+      if (item.pending) meta.appendChild(el('span', null, '发送中…'))
+      if (item.failed) {
+        const r = el('span', 'retry-send', '发送失败 · 点按重试')
+        meta.appendChild(r)
+        meta.onclick = () => retrySend(s, item)
+      }
+      m.appendChild(meta)
       return m
     }
     case 'assistant': {
@@ -457,6 +561,7 @@ function itemNode(item) {
         b.appendChild(r)
       }
       m.appendChild(b)
+      if (item.time) m.appendChild(el('div', 'm-meta', fmtTime(item.time)))
       return m
     }
     case 'tool': return toolNode(item)
@@ -480,6 +585,17 @@ function itemNode(item) {
   return el('div')
 }
 function renderChatPending(s, sc) {
+  // 队列消息（其它端发来的排队/插话消息；本设备的已由乐观气泡显示）
+  for (const q of s.queue) {
+    const rid = q.message && q.message.source && q.message.source.rpcId
+    if (rid && s.items.some((x) => x.kind === 'user' && x.rpcId === rid)) continue
+    const text = textOf(q.message && q.message.content)
+    if (!text.trim()) continue
+    const chip = el('div', 'queue-chip')
+    chip.appendChild(el('span', 'q-dot'))
+    chip.appendChild(el('span', 'q-text', (q.placement === 'steering' ? '插话 · ' : '排队 · ') + text))
+    sc.appendChild(chip)
+  }
   for (const a of s.approvals.values()) {
     const n = approvalNode(s, a); n.id = 'ap-' + cssId(a.approvalId); sc.appendChild(n)
   }
@@ -509,18 +625,32 @@ function statusBadge(s) {
   for (const a of s.approvals.values()) if (!a.outcome) return ['approval', '等待审批']
   for (const q of s.questions.values()) if (!q.outcome) return ['question', '等待回答']
   if (s.running) return ['running', '运行中']
-  return ['done', '已结束']
+  return ['done', '空闲']
 }
 function renderList() {
   const wrap = $('#session-list')
+  if (!wrap) return
   wrap.textContent = ''
   const q = ($('#search').value || '').toLowerCase()
-  const visible = [...S.sessions.values()]
+  let visible = [...S.sessions.values()]
     .filter((s) => !s.blank || s.running || s.title)
     .filter((s) => !s.subagent)
     .filter((s) => !S.archived.has(s.id))
     .filter((s) => !q || sessTitle(s).toLowerCase().includes(q) || (s.cwd || '').toLowerCase().includes(q))
     .sort((a, b) => b.updatedAt - a.updatedAt)
+  if (S.todoMode) {
+    visible = visible.filter(hasPending)
+    if (!visible.length) {
+      wrap.appendChild(el('div', 'empty-state', '没有待处理的事项 ✅'))
+      return
+    }
+    const g = el('div', 'ws-group')
+    g.appendChild(el('span', 'ws-ico', '⚡'))
+    g.appendChild(el('span', null, '待处理（' + visible.length + '）'))
+    wrap.appendChild(g)
+    for (const s of visible) wrap.appendChild(sessionCard(s))
+    return
+  }
   const byWs = new Map()
   const ungrouped = []
   for (const s of visible) {
@@ -569,8 +699,6 @@ function refreshBadges() {
   const n = pendingCount()
   const elN = $('#tab-badge')
   if (elN) { elN.style.display = n ? 'flex' : 'none'; elN.textContent = n }
-  const sub = $('#conn-sub')
-  if (sub) sub.textContent = n ? n + ' 个待处理' : ''
 }
 
 /* ================= 数据加载 ================= */
@@ -590,8 +718,12 @@ async function loadBase() {
       s.blank = !!item.blank
       s.cwd = item.cwd || ''
       s.agentPreset = item.agentPreset || null
-      const title = item.projections && item.projections.values && item.projections.values.title
-      if (typeof title === 'string' && title) s.title = title
+      const values = item.projections && item.projections.values
+      if (values) {
+        if (typeof values.title === 'string' && values.title) s.title = values.title
+        if (values.permissions && Array.isArray(values.permissions.options)) s.permissions = values.permissions
+        if (values.imageLimits) s.imageLimits = values.imageLimits
+      }
     }
     setConn('online')
     renderList()
@@ -602,15 +734,19 @@ async function loadBase() {
 }
 async function loadHistory(s) {
   const v = await rpc('session.history', { sessionId: s.id })
+  // 乐观上屏的 pending 项在重载后保留（真实事件到达时就地转正）
+  const pend = s.items.filter((i) => i.kind === 'user' && i.pending)
   s.items = []
   s.callArgs = new Map()
   for (const entry of v.events || []) foldEvent(s, entry.event, entry.view)
+  for (const p of pend) if (!s.items.some((i) => i.rpcId === p.rpcId)) s.items.push(p)
   s.hasMore = !!v.hasMore
   s.oldestSeq = (v.events && v.events.length) ? v.events[0].event.seq : null
   const values = v.projections && v.projections.values
   if (values) {
     if (typeof values.title === 'string' && values.title) s.title = values.title
     if (values.permissions && Array.isArray(values.permissions.options)) s.permissions = values.permissions
+    if (values.imageLimits) s.imageLimits = values.imageLimits
   }
   s.loaded = true
 }
@@ -635,6 +771,7 @@ function setConn(state) {
     pill.classList.toggle('off', state !== 'online')
     pill.querySelector('span:last-child').textContent = state === 'online' ? '已连接' : state === 'offline' ? '已断开' : '连接中…'
   }
+  if (S.current) refreshChatChrome(sess(S.current))
 }
 /* 一个带自动重连的下行 WS 流。重连时服务端会重放基线帧。 */
 function wsStream(key, path, onFrame, onOpen) {
@@ -690,11 +827,17 @@ function handleMux(rpcId, p) {
       }
       break
     }
+    case 'session/queue': {
+      if (!s) return
+      s.queue = (p.items || []).filter((it) => it.placement !== 'context')
+      if (S.current === s.id) scheduleRender(s)
+      break
+    }
     case 'approval/requested': {
       if (!s) return
       s.approvals.set(p.approvalId, { rpcId, approvalId: p.approvalId, toolName: p.toolName, callId: p.callId, reason: p.reason, outcome: null })
       vibrate([80, 60, 80])
-      toast('⚠️ ' + p.toolName + ' 等待审批')
+      toast('⚠️ ' + p.toolName + ' 等待审批 — 点按查看', { sessionId: s.id })
       if (S.current === s.id) renderChat(s, true)
       refreshBadges(); renderList()
       break
@@ -710,7 +853,7 @@ function handleMux(rpcId, p) {
       if (!s) return
       s.questions.set(rpcId, { rpcId, questions: p.questions, outcome: null })
       vibrate([80, 60, 80])
-      toast('🤔 Agent 有一个问题')
+      toast('🤔 Agent 有一个问题 — 点按查看', { sessionId: s.id })
       if (S.current === s.id) renderChat(s, true)
       refreshBadges(); renderList()
       break
@@ -759,33 +902,62 @@ function startHostStream() {
 function showView(name) {
   document.querySelectorAll('.view').forEach((v) => v.classList.remove('active'))
   $('#view-' + name).classList.add('active')
-  document.querySelectorAll('.tabbar .tab').forEach((t) => t.classList.toggle('on', t.dataset.view === name))
+  updateTabs()
+}
+function updateTabs() {
+  document.querySelectorAll('.tabbar .tab').forEach((t) => {
+    const tab = t.dataset.tab
+    t.classList.toggle('on',
+      (tab === 'sessions' && !S.todoMode && !S.current) ||
+      (tab === 'todo' && S.todoMode) ||
+      (tab === 'new' && location.hash === '#/new'))
+  })
 }
 async function openSession(id, force) {
   const s = sess(id)
   S.current = id
+  S.todoMode = false
   $('#chat-title').textContent = sessTitle(s)
-  $('#chat-sub').textContent = s.cwd || ''
   showView('chat')
   const sc = chatScrollEl()
   sc.textContent = ''
   if (!s.loaded || force) {
-    sc.appendChild(el('div', 'empty-state', '加载中…'))
-    try { await loadHistory(s) } catch (e) { sc.textContent = ''; sc.appendChild(el('div', 'empty-state', '加载失败：' + e.message)); return }
+    const loading = el('div', 'empty-state')
+    loading.appendChild(el('span', 'spinner'))
+    loading.appendChild(document.createTextNode(' 加载中…'))
+    sc.appendChild(loading)
+    try { await loadHistory(s) } catch (e) {
+      sc.textContent = ''
+      const d = el('div', 'empty-state', '加载失败：' + e.message)
+      d.appendChild(document.createElement('br'))
+      const retry = el('button', 'retry', '重试')
+      retry.onclick = () => openSession(id, true)
+      d.appendChild(retry)
+      sc.appendChild(d)
+      return
+    }
   }
   renderChat(s, true)
   refreshChatChrome(s)
 }
 function refreshChatChrome(s) {
+  const off = S.connState !== 'online'
   const bar = $('#running-bar')
   if (bar) bar.classList.toggle('show', !!s.running)
   const input = $('#chat-input')
-  if (input) input.dataset.ph = s.running ? '追加指令（steer）…' : '发消息…'
+  if (input) {
+    input.dataset.ph = off ? '连接已断开…' : s.running ? '追加指令（steer）…' : '发消息…'
+    input.classList.toggle('off', off)
+  }
+  const send = $('#send-btn')
+  if (send) send.disabled = off
+  const sub = $('#chat-sub')
+  if (sub) { sub.textContent = off ? '连接已断开，重连中…' : (s.cwd || ''); sub.classList.toggle('off', off) }
 }
 function route() {
   const h = location.hash || '#/'
-  if (h.startsWith('#/s/')) { openSession(decodeURIComponent(h.slice(4))) ; return }
-  if (h === '#/new') { showView('new'); renderNew(); return }
+  if (h.startsWith('#/s/')) { openSession(decodeURIComponent(h.slice(4))); updateTabs(); return }
+  if (h === '#/new') { S.current = null; showView('new'); renderNew(); return }
   S.current = null
   showView('list')
   renderList()
@@ -793,6 +965,7 @@ function route() {
 
 /* ================= 新会话 ================= */
 let newSel = null
+let newPreset = null
 async function renderNew() {
   const wrap = $('#new-ws-list')
   wrap.textContent = ''
@@ -813,13 +986,36 @@ async function renderNew() {
     row.onclick = () => { newSel = w.workspaceId; vibrate(8); wrap.querySelectorAll('.pick-ws').forEach((x) => x.classList.remove('sel')); row.classList.add('sel') }
     wrap.appendChild(row)
   }
+  // Agent 预设
+  const prow = $('#preset-row')
+  prow.textContent = ''
+  if (!S.presets) {
+    prow.appendChild(el('span', 'sheet-note', '加载预设…'))
+    rpc('agentPreset.list', {})
+      .then((v) => {
+        S.presets = (v.presets || []).map((p) => ({ id: p.id, name: p.name || p.id, isDefault: !!p.isDefault }))
+        if (location.hash === '#/new') renderNew()
+      })
+      .catch(() => { S.presets = []; if (location.hash === '#/new') renderNew() })
+    return
+  }
+  if (!S.presets.length) { prow.appendChild(el('span', 'sheet-note', '使用默认预设')); return }
+  if (!newPreset || !S.presets.find((p) => p.id === newPreset)) {
+    const def = S.presets.find((p) => p.isDefault) || S.presets[0]
+    newPreset = def.id
+  }
+  for (const p of S.presets) {
+    const chip = el('span', 'chip' + (p.id === newPreset ? ' sel' : ''), p.name)
+    chip.onclick = () => { newPreset = p.id; vibrate(8); prow.querySelectorAll('.chip').forEach((x) => x.classList.remove('sel')); chip.classList.add('sel') }
+    prow.appendChild(chip)
+  }
 }
 async function startSession() {
   const text = $('#new-input').textContent.trim()
   const btn = $('#start-btn')
   btn.disabled = true; btn.textContent = '创建中…'
   try {
-    const v = await rpc('session.create', { workspaceId: newSel })
+    const v = await rpc('session.create', { workspaceId: newSel, ...(newPreset ? { agentPreset: newPreset } : {}) })
     const s = sess(v.sessionId)
     s.blank = !text
     s.updatedAt = Date.now()
@@ -838,10 +1034,33 @@ async function startSession() {
 }
 
 /* ================= 发消息 / 停止 ================= */
-async function sendPrompt(id, text) {
+async function sendPrompt(id, text, images) {
   const s = sess(id)
-  const mode = s.running ? 'steer' : 'queue'
-  await rpc('session.prompt', { sessionId: id, mode, content: [{ type: 'text', text }], clientTimeZone: tz() })
+  const rpcId = uuid()
+  const item = { kind: 'user', text: text || '', images: images && images.length ? images : null, time: Date.now(), pending: true, failed: false, rpcId }
+  s.items.push(item)
+  s.updatedAt = Date.now()
+  s.lastPreview = text || '[图片]'
+  if (S.current === id) renderChat(s, true)
+  renderListSoon()
+  const content = []
+  if (text) content.push({ type: 'text', text })
+  for (const im of images || []) content.push({ type: 'image', mediaType: im.mediaType, data: im.data, name: im.name })
+  try {
+    const mode = s.running ? 'steer' : 'queue'
+    await rpc('session.prompt', { sessionId: id, mode, content, clientTimeZone: tz() }, rpcId)
+    // 服务器已受理；保持 pending 样式直到 user/message 事件（进入会话）就地转正
+  } catch (e) {
+    item.pending = false; item.failed = true
+    if (S.current === id) renderChat(s)
+    toast('发送失败：' + e.message, true)
+  }
+}
+function retrySend(s, item) {
+  // 移除失败项，用同样的内容重新发一条（新的 rpcId）
+  const i = s.items.indexOf(item)
+  if (i >= 0) s.items.splice(i, 1)
+  sendPrompt(s.id, item.text, item.images)
 }
 async function cancelSession(id) {
   try { await rpc('session.cancel', { sessionId: id }); toast('已发送停止 ■') } catch (e) { toast(e.message, true) }
@@ -946,15 +1165,45 @@ function permRow(s, opt, currentValue) {
   return row
 }
 
-/* ================= Toast ================= */
+/* ================= Toast（可点击跳转） ================= */
 let toastTimer = null
-function toast(text, isErr) {
-  let t = $('#toast')
+function toast(text, opts) {
+  const o = typeof opts === 'boolean' ? { isErr: opts } : (opts || {})
+  const t = $('#toast')
   t.textContent = text
-  t.style.borderColor = isErr ? 'rgba(255,69,58,.5)' : 'var(--line)'
+  t.style.borderColor = o.isErr ? 'rgba(255,69,58,.5)' : o.sessionId ? 'rgba(59,130,246,.5)' : 'var(--line)'
+  t.classList.toggle('clickable', !!o.sessionId)
+  t.onclick = o.sessionId ? () => { location.hash = '#/s/' + o.sessionId; t.classList.remove('show') } : null
   t.classList.add('show')
   clearTimeout(toastTimer)
-  toastTimer = setTimeout(() => t.classList.remove('show'), 2000)
+  toastTimer = setTimeout(() => t.classList.remove('show'), 2600)
+}
+
+/* ================= 下拉刷新 ================= */
+function initPtr(sc) {
+  const ind = $('#ptr')
+  if (!sc || !ind) return
+  let startY = null, pulling = false
+  sc.addEventListener('touchstart', (e) => {
+    if (sc.scrollTop <= 0 && e.touches.length === 1) { startY = e.touches[0].clientY; pulling = true }
+  }, { passive: true })
+  sc.addEventListener('touchmove', (e) => {
+    if (!pulling) return
+    const dy = e.touches[0].clientY - startY
+    if (dy > 12 && sc.scrollTop <= 0) {
+      ind.classList.add('show')
+      ind.textContent = dy > 72 ? '松开刷新' : '下拉刷新…'
+    } else if (dy <= 4) ind.classList.remove('show')
+  }, { passive: true })
+  sc.addEventListener('touchend', (e) => {
+    if (!pulling) return
+    pulling = false
+    const dy = e.changedTouches[0].clientY - startY
+    if (dy > 72 && sc.scrollTop <= 0) {
+      ind.textContent = '刷新中…'
+      loadBase().finally(() => ind.classList.remove('show'))
+    } else ind.classList.remove('show')
+  })
 }
 
 /* ================= 骨架 ================= */
@@ -965,28 +1214,32 @@ function buildShell() {
       <div class="big-title">会话</div>
       <span class="conn-pill" id="conn-pill"><span class="dot"></span><span>连接中…</span></span>
     </div></div>
-    <div class="scroll">
-      <div class="search-wrap"><input class="search" id="search" placeholder="搜索会话"></div>
+    <div class="scroll" id="list-scroll">
+      <div class="ptr" id="ptr"></div>
+      <div class="search-wrap"><input class="search" id="search" placeholder="搜索会话" autocapitalize="off" autocorrect="off" spellcheck="false" aria-label="搜索会话"></div>
       <div id="session-list"></div>
     </div>
     <div class="tabbar">
-      <button class="tab on" data-view="list"><span class="ico">💬</span>会话</button>
-      <button class="tab" data-view="list" id="tab-todo"><span class="ico">⚡<span class="n" id="tab-badge" style="display:none">0</span></span>待办</button>
-      <button class="tab" data-view="new" id="tab-new"><span class="ico">＋</span>新会话</button>
+      <button class="tab on" data-tab="sessions" id="tab-sessions" aria-label="会话"><span class="ico" aria-hidden="true">💬</span>会话</button>
+      <button class="tab" data-tab="todo" id="tab-todo" aria-label="待办"><span class="ico" aria-hidden="true">⚡<span class="n" id="tab-badge" style="display:none">0</span></span>待办</button>
+      <button class="tab" data-tab="new" id="tab-new" aria-label="新会话"><span class="ico" aria-hidden="true">＋</span>新会话</button>
     </div>
   </div>
   <div class="view" id="view-chat">
     <div class="navbar"><div class="bar">
-      <button class="nav-btn back" id="chat-back">‹</button>
+      <button class="nav-btn back" id="chat-back" aria-label="返回">‹</button>
       <div class="title"><span id="chat-title"></span><div class="subtitle" id="chat-sub"></div></div>
-      <button class="nav-btn" id="chat-more">⋯</button>
+      <button class="nav-btn" id="chat-more" aria-label="会话设置">⋯</button>
     </div></div>
     <div class="chat-scroll" id="chat-scroll"></div>
     <div class="composer-wrap">
-      <div class="running-bar" id="running-bar"><span>●</span> Agent 正在工作…<button class="stop" id="stop-btn">■ 停止</button></div>
+      <div class="running-bar" id="running-bar"><span>●</span> Agent 正在工作…<button class="stop" id="stop-btn" aria-label="停止当前任务">■ 停止</button></div>
+      <div class="attach-strip" id="attach-strip"></div>
       <div class="composer">
-        <div class="input-box" id="chat-input" contenteditable data-ph="发消息…"></div>
-        <button class="send" id="send-btn">↑</button>
+        <button class="c-btn" id="attach-btn" aria-label="添加图片">＋</button>
+        <input type="file" id="attach-input" accept="image/png,image/jpeg,image/webp,image/gif" multiple style="display:none">
+        <div class="input-box" id="chat-input" contenteditable data-ph="发消息…" aria-label="消息输入框"></div>
+        <button class="send" id="send-btn" aria-label="发送">↑</button>
       </div>
     </div>
   </div>
@@ -998,28 +1251,66 @@ function buildShell() {
     <div class="scroll">
       <div class="ws-group"><span class="ws-ico">📂</span><span>选择工作区</span></div>
       <div id="new-ws-list"></div>
+      <div class="ws-group"><span class="ws-ico">🤖</span><span>Agent 预设</span></div>
+      <div class="preset-row" id="preset-row"></div>
       <div class="ws-group"><span class="ws-ico">✨</span><span>说点什么开始（可留空）</span></div>
-      <div class="new-input" id="new-input" contenteditable data-ph="帮我把 …"></div>
+      <div class="new-input" id="new-input" contenteditable data-ph="帮我把 …" aria-label="首条消息"></div>
       <button class="start-btn" id="start-btn">开始会话</button>
     </div>
   </div>
   <div class="sheet-overlay" id="sheet-overlay">
-    <div class="sheet">
+    <div class="sheet" role="dialog" aria-label="会话设置">
       <div class="grabber"></div>
       <div class="sheet-scroll" id="sheet-content"></div>
     </div>
   </div>
-  <div class="toast" id="toast"></div>`
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>`
   $('#search').addEventListener('input', renderList)
   $('#chat-back').onclick = () => { location.hash = '#/' }
   $('#chat-more').onclick = () => { if (S.current) openSheet(sess(S.current)) }
   $('#sheet-overlay').addEventListener('click', (e) => { if (e.target.id === 'sheet-overlay') closeSheet() })
   $('#new-cancel').onclick = () => { location.hash = '#/' }
-  $('#tab-new').onclick = () => { location.hash = '#/new' }
-  $('#tab-todo').onclick = () => { location.hash = '#/' }
+  $('#tab-new').onclick = () => { S.todoMode = false; location.hash = '#/new'; updateTabs() }
+  $('#tab-sessions').onclick = () => { S.todoMode = false; if (location.hash !== '#/') location.hash = '#/'; renderList(); updateTabs() }
+  $('#tab-todo').onclick = () => { S.todoMode = true; if (location.hash !== '#/') location.hash = '#/'; renderList(); updateTabs() }
   $('#start-btn').onclick = startSession
   $('#stop-btn').onclick = () => S.current && cancelSession(S.current)
+  initPtr($('#list-scroll'))
+  // 图片附件
+  let pendingImages = []
+  const strip = $('#attach-strip')
+  const renderStrip = () => {
+    strip.textContent = ''
+    strip.classList.toggle('show', pendingImages.length > 0)
+    pendingImages.forEach((im, i) => {
+      const th = el('div', 'attach-thumb')
+      const img = el('img'); img.src = im.previewUrl; img.alt = im.name
+      const rm = el('button', 'rm', '✕')
+      rm.setAttribute('aria-label', '移除图片')
+      rm.onclick = () => { pendingImages.splice(i, 1); renderStrip() }
+      th.append(img, rm)
+      strip.appendChild(th)
+    })
+  }
+  $('#attach-btn').onclick = () => $('#attach-input').click()
+  $('#attach-input').addEventListener('change', async (e) => {
+    const files = [...(e.target.files || [])]
+    e.target.value = ''
+    const limits = S.current ? sess(S.current).imageLimits : null
+    const maxN = (limits && limits.maxImagesPerMessage) || 20
+    for (const f of files) {
+      if (pendingImages.length >= maxN) { toast('最多 ' + maxN + ' 张图片', true); break }
+      try { pendingImages.push(await fileToImage(f)) } catch (err) { toast(err.message, true) }
+    }
+    renderStrip()
+  })
   const input = $('#chat-input')
+  // contenteditable 只粘贴纯文本，避免富文本样式污染
+  input.addEventListener('paste', (e) => {
+    e.preventDefault()
+    const text = (e.clipboardData || window.clipboardData).getData('text/plain')
+    document.execCommand('insertText', false, text)
+  })
   input.addEventListener('focus', () => {
     // 键盘弹起后把对话滚到底
     setTimeout(() => { const sc = chatScrollEl(); if (sc) sc.scrollTop = sc.scrollHeight }, 250)
@@ -1031,10 +1322,14 @@ function buildShell() {
   })
   const doSend = async () => {
     const text = input.textContent.trim()
-    if (!text || !S.current) return
+    if ((!text && !pendingImages.length) || !S.current) return
+    if (S.connState !== 'online') { toast('当前离线，等待重连…', true); return }
+    const images = pendingImages
+    pendingImages = []
+    renderStrip()
     input.textContent = ''
     vibrate(8)
-    try { await sendPrompt(S.current, text) } catch (e) { toast('发送失败：' + e.message, true); input.textContent = text }
+    sendPrompt(S.current, text, images)  // 乐观上屏，失败在气泡上重试
   }
   $('#send-btn').onclick = doSend
 }
