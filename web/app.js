@@ -98,10 +98,10 @@ function dayLabel(ts) {
 }
 
 /* 裸 URL → 可点 <a>（点按拉起系统浏览器）。
- * 跳过 [文字](链接) 语法内的地址和 `行内代码` 里的地址（负向后顾；
- * 老浏览器不支持 lookbehind 时降级，仅损失这两个边界情形）。 */
+ * 跳过 [文字](链接) 语法内的地址（负向后顾）；行内代码里的 URL 也链接化
+ *（渲染为可点的等宽链接——用户高频场景）。老浏览器不支持 lookbehind 时降级。 */
 let BARE_URL_RE
-try { BARE_URL_RE = new RegExp('(?<!\\]\\()(?<!`)(https?:\\/\\/[^\\s<>"\')\\]`]+)', 'g') }
+try { BARE_URL_RE = new RegExp('(?<!\\]\\()(https?:\\/\\/[^\\s<>"\')\\]`]+)', 'g') }
 catch (e) { BARE_URL_RE = /(https?:\/\/[^\s<>"')\]`]+)/g }
 function anchorize(u) {
   return '<a href="' + u + '" target="_blank" rel="noopener">' + u + '</a>'
@@ -2487,9 +2487,10 @@ function buildShell() {
     if (a) {
       e.preventDefault()
       vibrate(6)
-      // iOS 独立模式下 target=_blank 不可靠：window.open 才能稳定拉起 Safari/默认浏览器
-      const w = window.open(a.href, '_blank', 'noopener')
-      if (!w) toast('若未打开浏览器，请长按链接复制后访问')
+      // iOS 独立模式：window.open 拉起 Safari（noopener 第三参在部分 WebKit 会让 open 失效）
+      let ok = true
+      try { ok = !!window.open(a.href, '_blank') } catch (err) { ok = false }
+      if (!ok) { copyText(a.href, () => {}); toast('链接已复制，粘贴到浏览器访问') }
       return
     }
     const cp = e.target.closest && e.target.closest('.code-copy')
