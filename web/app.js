@@ -1927,25 +1927,48 @@ async function renderNew() {
     prow.appendChild(chip)
   }
 }
+/* 工作区有两种来源，创建会话时的定位参数必须跟着变：
+   - workspace/follow 注册表项：workspaceId 是不透明 id（0f7d3c66-…），只能传 workspaceId
+   - session/list 的 cwd 推导项：workspaceId 就是路径，只能传 cwd
+   传错会被宿主拒绝：failed to create session … cwd must be an absolute path */
+function createLocator(ws, fallback) {
+  if (!ws || !ws.path) return { cwd: fallback }
+  return ws.workspaceId === ws.path ? { cwd: ws.path } : { workspaceId: ws.workspaceId }
+}
+function prettyCreateError(e) {
+  const m = String((e && e.message) || e || '')
+  if (/absolute path/.test(m)) return '工作区路径无效，请重新选择工作区'
+  if (/workspace\/not-found|not found/.test(m) && /workspace/i.test(m)) return '工作区已失效，请重新选择'
+  return m.replace(/^failed to create session "[^"]*":\s*(Error:\s*)?/, '')
+}
 async function startSession() {
   const text = $('#new-input').textContent.trim()
   const btn = $('#start-btn')
   btn.disabled = true; btn.textContent = '创建中…'
   try {
-    const v = await rpc('session/create', { request: { cwd: newSel, ...(newPreset ? { agentPreset: newPreset } : {}) } })
+    const ws = S.workspaces.find((w) => w.workspaceId === newSel)
+    const loc = createLocator(ws, newSel)
+    let v
+    try {
+      v = await rpc('session/create', { request: { ...loc, ...(newPreset ? { agentPreset: newPreset } : {}) } })
+    } catch (e) {
+      // 注册表项过期（工作区已删除/改名）→ 退回用路径创建，别让用户卡在报错上
+      if (loc.workspaceId && ws && ws.path) {
+        v = await rpc('session/create', { request: { cwd: ws.path, ...(newPreset ? { agentPreset: newPreset } : {}) } })
+      } else throw e
+    }
     const s = sess(v.sessionId)
     s.blank = !text
     s.createdHere = true  // 本机创建：即使为空也保留在列表里
     s.updatedAt = Date.now()
-    const ws = S.workspaces.find((w) => w.workspaceId === newSel)
-    if (ws) s.cwd = ws.path
+    if (ws && ws.path) s.cwd = ws.path
     location.hash = '#/s/' + v.sessionId
     if (text) {
       $('#new-input').textContent = ''
       await sendPrompt(v.sessionId, text)
     }
   } catch (e) {
-    toast('创建失败：' + e.message, true)
+    toast('创建失败：' + prettyCreateError(e), true)
   } finally {
     btn.disabled = false; btn.textContent = '开始会话'
   }
