@@ -27,6 +27,29 @@ const uuid = () => crypto.randomUUID ? crypto.randomUUID() :
   })
 const tz = () => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone } catch (e) { return undefined } }
 const vibrate = (ms) => { try { if (navigator.vibrate) navigator.vibrate(ms) } catch (e) {} }
+/* 键盘弹起时点输入区附近的按钮：touchend 后 iOS 先收键盘（#app 高度复原、按钮位移），
+   浏览器随即将合成的 click 判定为「点到了别处」直接丢弃 —— 表现就是第一次点没反应、要点两次。
+   这里统一改为 touchend 就执行动作（手指没滑动才算点按），并吃掉随后的合成 click；
+   鼠标/键盘触发仍走 click 路径。 */
+function onTap(node, fn) {
+  if (!node) return
+  let sx = 0, sy = 0, moved = false, touchAt = 0
+  node.addEventListener('touchstart', (e) => {
+    const t = e.touches[0]; sx = t.clientX; sy = t.clientY; moved = false
+  }, { passive: true })
+  node.addEventListener('touchmove', (e) => {
+    const t = e.touches[0]
+    if (Math.abs(t.clientX - sx) > 10 || Math.abs(t.clientY - sy) > 10) moved = true
+  }, { passive: true })
+  node.addEventListener('touchcancel', () => { moved = true }, { passive: true })
+  node.addEventListener('touchend', (e) => {
+    if (moved) return
+    touchAt = Date.now()
+    if (e.cancelable) e.preventDefault()  // 吞掉合成 click，防止与这里重复触发
+    fn(e)
+  }, { passive: false })
+  node.addEventListener('click', (e) => { if (Date.now() - touchAt > 500) fn(e) })
+}
 /* 复制文本：clipboard API 在非安全上下文（http over Tailscale）不可用，降级 execCommand */
 function copyText(t, done) {
   if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(t).then(done, done); return }
@@ -1878,7 +1901,7 @@ function renderQueueStrip(s) {
     const tag = el('span', 'q-tag', q.placement === 'steering' ? '插话' : '排队 #' + qi)
     const tx = el('span', 'q-text', text)
     chip.append(dot, tag, tx)
-    chip.onclick = () => openQSheet(s, q)
+    onTap(chip, () => openQSheet(s, q))  // 排队 chip 也在输入区：同樣走 touchend 派发
     strip.appendChild(chip)
   }
 }
@@ -2713,12 +2736,12 @@ function buildShell() {
   connPill.onclick = manualReconnect
   connPill.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); manualReconnect() } }
   // 「↓」pill：不在底部时始终显示（回到底部）；有新消息时升级为「↓ 新消息」
-  $('#new-msg-pill').onclick = () => {
+  onTap($('#new-msg-pill'), () => {   // 靠近输入区，同样走 touchend 派发
     const sc = chatScrollEl()
     if (sc) sc.scrollTop = sc.scrollHeight
     if (S.current) sess(S.current)._newBelow = false
     updateJumpPill()
-  }
+  })
   $('#chat-scroll').addEventListener('scroll', () => {
     const sc = chatScrollEl()
     if (!sc) return
@@ -2776,7 +2799,7 @@ function buildShell() {
     }
     renderStrip()
   }
-  $('#attach-btn').onclick = () => $('#attach-input').click()
+  onTap($('#attach-btn'), () => $('#attach-input').click())  // 输入区按钮：键盘弹起时合成 click 会被位移吞掉，走 onTap
   $('#attach-input').addEventListener('change', async (e) => {
     const files = [...(e.target.files || [])]
     e.target.value = ''
@@ -2821,13 +2844,16 @@ function buildShell() {
     vibrate(8)
     sendPrompt(S.current, text, images, forceMode)  // 乐观上屏，失败在气泡上重试
   }
-  $('#send-btn').onclick = () => doSend(null)
-  // 长按发送 = 本次反向（默认排队 → 长按插话；反之亦然）
-  let sendLpTimer = null, sendLpFired = false
+  // 发送：短按在 touchend 就执行（键盘收起引起的按钮位移会让合成 click 被丢弃＝第一次点白点），
+  // 长按（420ms）= 本次反向（默认排队 → 长按插话；反之亦然）。鼠标/键盘仍走 click。
   const sendBtn = $('#send-btn')
-  sendBtn.addEventListener('touchstart', () => {
-    sendLpFired = false
-    clearTimeout(sendLpTimer)
+  let sendLpTimer = null, sendLpFired = false, sendMoved = false, sendSx = 0, sendSy = 0, sendTouchAt = 0
+  const cancelLp = () => clearTimeout(sendLpTimer)
+  sendBtn.addEventListener('touchstart', (e) => {
+    const t = e.touches[0]
+    sendSx = t.clientX; sendSy = t.clientY
+    sendMoved = false; sendLpFired = false
+    cancelLp()
     sendLpTimer = setTimeout(() => {
       sendLpFired = true
       vibrate([30, 40, 30])
@@ -2836,10 +2862,21 @@ function buildShell() {
       doSend(inv)
     }, 420)
   }, { passive: true })
-  const cancelLp = () => clearTimeout(sendLpTimer)
-  sendBtn.addEventListener('touchend', (e) => { cancelLp(); if (sendLpFired) { e.preventDefault(); sendLpFired = false } }, { passive: false })
-  sendBtn.addEventListener('touchmove', cancelLp)
-  sendBtn.addEventListener('touchcancel', cancelLp)
+  sendBtn.addEventListener('touchmove', (e) => {
+    const t = e.touches[0]
+    if (Math.abs(t.clientX - sendSx) > 10 || Math.abs(t.clientY - sendSy) > 10) { sendMoved = true; cancelLp() }
+  }, { passive: true })
+  sendBtn.addEventListener('touchcancel', () => { cancelLp(); sendMoved = true }, { passive: true })
+  sendBtn.addEventListener('touchend', (e) => {
+    cancelLp()
+    const long = sendLpFired
+    sendLpFired = false
+    if (sendMoved) return
+    sendTouchAt = Date.now()
+    if (e.cancelable) e.preventDefault()  // 已在这里发送，吞掉合成 click 防止重复
+    if (!long) doSend(null)
+  }, { passive: false })
+  sendBtn.addEventListener('click', () => { if (Date.now() - sendTouchAt > 500) doSend(null) })
   // 排队操作单：背景关闭 + 下拽关闭
   $('#q-ov').addEventListener('click', (e) => { if (e.target.id === 'q-ov') closeQSheet() })
   // 会话长按操作单：初始化 + 背景关闭
