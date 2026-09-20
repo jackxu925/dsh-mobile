@@ -158,11 +158,13 @@ function md(src) {
 /* ================= API 层 ================= */
 /* 一元 RPC：POST /api/<ns>/<method>，payload 必须恰为 {args:{…}}（wire 名
  * _request / request / 或 commands 的扁平字段），method 必须与端点一致。 */
-async function rpc(endpoint, args, rpcId) {
+async function rpc(endpoint, args, rpcId, timeoutMs) {
   const r = await fetch('/api/' + endpoint, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ type: 'client-request', rpcId: rpcId || uuid(), method: endpoint, payload: { args: args || {} } }),
+    // Tailscale 抖动时挂起的请求会让气泡永远停在「发送中」：20s 超时落地成失败态（可点重试）
+    signal: AbortSignal.timeout(timeoutMs || 20000),
   })
   if (!r.ok) throw new Error(endpoint + ': HTTP ' + r.status + (r.status === 401 ? '（登录已过期：请重新打开带 token 的登录链接）' : r.status === 403 ? '（主机不在信任名单）' : ''))
   const full = await r.json()
@@ -1725,7 +1727,7 @@ function renderQueueStrip(s) {
     // 修复：队列广播的 source 是空对象（无 requestId），按文本兜底去重——
     // 否则同一条消息既有乐观气泡又挂 chip，被领取后观感就是「chip 不消失」
     const text = textOf(q.message && q.message.content)
-    if (!rid && text && s.items.some((x) => x.kind === 'user' && (x.pending || x.failed === false) && x.text === text)) return false
+    if (!rid && text && s.items.some((x) => x.kind === 'user' && (x.pending || x.sent) && x.text === text)) return false
     return true
   })
   strip.classList.toggle('show', items.length > 0)
@@ -1973,11 +1975,16 @@ async function sendPrompt(id, text, images, forceMode) {
         await rpc('session/prompt', { request: { requestId: rpcId, sessionId: id, mode: 'queue', content, clientTimeZone: tz() } })
       } else throw e
     }
-    // 服务器已受理；保持 pending 样式直到 user/message 事件（进入会话）就地转正
+    // RPC 已受理 → 传输完成（排队/插话交给宿主）。气泡不再显示「发送中」；
+    // 等 user/message 事件到达时就地转正（rpcId 匹配），队列 chip 的文案去重覆盖排队期
+    item.pending = false
+    item.sent = true
+    if (S.current === id) scheduleRender(s)
   } catch (e) {
     item.pending = false; item.failed = true
     if (S.current === id) renderChat(s)
-    toast('发送失败：' + e.message, true)
+    const isTimeout = e && (e.name === 'TimeoutError' || e.name === 'AbortError')
+    toast(isTimeout ? '网络超时，未送达 — 点气泡上的重试' : '发送失败：' + e.message, true)
   }
 }
 function retrySend(s, item) {

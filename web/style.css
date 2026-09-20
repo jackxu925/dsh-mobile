@@ -735,3 +735,9 @@ html.light .run-dot { background:#2563eb; }
 
 /* 到顶自动加载的轻提示（无按钮，纯氛围） */
 .auto-load-hint { align-self:center; font-size:11.5px; color:var(--text-3); padding:2px 0 6px; opacity:.8; }
+
+/* ============ 导航栏热区与误触防护 ============ */
+/* ⋯ 和返回钮 40→44px（iOS HIG 最小命中区）；停止钮与 ⋯ 之间拉开 */
+.nav-btn { min-width:44px; height:44px; }
+.navbar .bar { gap:4px; }
+.nav-stop { width:34px; height:34px; margin-right:4px; }
