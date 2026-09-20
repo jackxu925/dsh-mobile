@@ -964,27 +964,95 @@ function sessionCard(s, showWs) {
   card.appendChild(row3)
   card.dataset.sid = s.id
   const open = () => { location.hash = '#/s/' + s.id }
-  card.onclick = open
+  card.onclick = () => { if (swipeState.openWrap) { closeSwipe() ; return } open() }
   card.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open() } }
-  return card
+
+  // ---- 左滑操作（iOS Mail 式）：滑出 重命名/分叉/停止/归档 ----
+  const wrap = el('div', 'swipe-wrap')
+  const actions = el('div', 'swipe-actions')
+  const mkAct = (glyph, label, color, fn) => {
+    const btn = el('button', 'swipe-act')
+    btn.type = 'button'
+    btn.style.background = color
+    btn.appendChild(el('span', 'sa-ico', glyph))
+    btn.appendChild(el('span', 'sa-label', label))
+    btn.onclick = () => { closeSwipe(); fn() }
+    actions.appendChild(btn)
+    return btn
+  }
+  mkAct('✏️', '改名', 'var(--accent)', () => openSessionMenu(s.id, 0, 0, true))
+  mkAct('⑂', '分叉', '#8b5cf6', async () => {
+    vibrate(8)
+    try { toast('正在分叉…'); const v = await rpc('session/fork', { request: { sessionId: s.id } }); toast('已分叉 ✓'); location.hash = '#/s/' + v.sessionId } catch (e) { toast('分叉失败：' + e.message, true) }
+  })
+  if (s.running) mkAct('⏹', '停止', 'var(--red)', async () => {
+    vibrate(8)
+    try { await rpc('session/cancel', { request: { sessionId: s.id } }); s.running = false; renderList(); toast('已发送停止 ■') } catch (e) { toast(e.message, true) }
+  })
+  mkAct('📦', '归档', '#6b7382', async () => {
+    vibrate(8)
+    try { await rpc('workspace/archiveSession', { request: { sessionId: s.id } }); S.sessions.delete(s.id); renderList(); toast('已归档（桌面端可恢复）') } catch (e) { toast('归档失败：' + e.message, true) }
+  })
+  wrap.append(actions, card)
+  initSwipe(wrap, card, actions)
+  return wrap
+}
+/* 左滑手势状态与初始化（全局同时只开一张卡） */
+const swipeState = { openWrap: null }
+function closeSwipe() {
+  if (swipeState.openWrap) {
+    swipeState.openWrap.classList.remove('open', 'dragging')
+    swipeState.openWrap.querySelector('.session-card').style.transform = ''
+    swipeState.openWrap = null
+  }
+}
+function initSwipe(wrap, card, actions) {
+  let sx = 0, sy = 0, dx = 0, dragging = false, decided = false
+  const W = () => actions.offsetWidth || 224
+  card.addEventListener('touchstart', (e) => {
+    if (e.touches.length !== 1) return
+    sx = e.touches[0].clientX; sy = e.touches[0].clientY
+    dx = 0; dragging = false; decided = false
+  }, { passive: true })
+  card.addEventListener('touchmove', (e) => {
+    const mx = e.touches[0].clientX - sx, my = e.touches[0].clientY - sy
+    if (!decided) {
+      if (Math.abs(mx) < 8 && Math.abs(my) < 8) return
+      decided = true
+      dragging = Math.abs(mx) > Math.abs(my) * 1.2 && mx < 0 || (swipeState.openWrap === wrap && Math.abs(mx) > Math.abs(my))
+      if (dragging) { wrap.classList.add('dragging'); if (swipeState.openWrap && swipeState.openWrap !== wrap) closeSwipe() }
+    }
+    if (!dragging) return
+    const base = swipeState.openWrap === wrap ? -W() : 0
+    dx = Math.min(0, base + mx)
+    card.style.transform = 'translateX(' + dx + 'px)'
+    if (e.cancelable) e.preventDefault()
+  }, { passive: false })
+  const finish = () => {
+    if (!decided || !dragging) return
+    dragging = false
+    wrap.classList.remove('dragging')
+    const threshold = -W() * 0.45
+    if (dx < threshold) {
+      card.style.transform = 'translateX(-' + W() + 'px)'
+      wrap.classList.add('open')
+      swipeState.openWrap = wrap
+      vibrate(8)
+    } else {
+      card.style.transform = ''
+      wrap.classList.remove('open')
+      if (swipeState.openWrap === wrap) swipeState.openWrap = null
+    }
+    dx = 0
+  }
+  card.addEventListener('touchend', finish)
+  card.addEventListener('touchcancel', finish)
 }
 /* 长按会话卡 → 操作单（重命名 / 分叉 / 归档 / 停止），对齐桌面能力 */
 let sessMenuTimer = null
 function initSessionLongPress(sc) {
   if (!sc) return
-  sc.addEventListener('touchstart', (e) => {
-    const card = e.target.closest && e.target.closest('.session-card')
-    if (!card) return
-    clearTimeout(sessMenuTimer)
-    sessMenuTimer = setTimeout(() => {
-      vibrate([30, 40, 30])
-      openSessionMenu(card.dataset.sid, e.touches[0].clientX, e.touches[0].clientY)
-    }, 460)
-  }, { passive: true })
-  const cancel = () => clearTimeout(sessMenuTimer)
-  sc.addEventListener('touchend', cancel)
-  sc.addEventListener('touchmove', cancel)
-  sc.addEventListener('touchcancel', cancel)
+  // 移动端改为左滑操作（见 sessionCard/initSwipe）；长按容易触发系统文字选择，已弃用
   // 桌面调试：右键唤出
   sc.addEventListener('contextmenu', (e) => {
     const card = e.target.closest && e.target.closest('.session-card')
@@ -993,7 +1061,7 @@ function initSessionLongPress(sc) {
     openSessionMenu(card.dataset.sid, e.clientX, e.clientY)
   })
 }
-function openSessionMenu(sid, x, y) {
+function openSessionMenu(sid, x, y, expandRename) {
   const s = sess(sid)
   if (!s) return
   const ov = $('#sess-ov'), sheet = $('#sess-sheet')
@@ -1005,12 +1073,14 @@ function openSessionMenu(sid, x, y) {
   $('#sess-rename-save').classList.remove('show')
   $('#sess-rename-box').textContent = sessTitle(s)
   const wire = (id, fn) => { $(id).onclick = fn }
-  wire('#sess-a-rename', () => {
+  const expandRenameBox = () => {
     vibrate(8)
     $('#sess-rename-box').classList.add('show')
     $('#sess-rename-save').classList.add('show')
     $('#sess-rename-box').focus()
-  })
+  }
+  wire('#sess-a-rename', expandRenameBox)
+  if (expandRename) setTimeout(expandRenameBox, 120)  // 左滑「改名」直达编辑
   wire('#sess-rename-save', async () => {
     const t = $('#sess-rename-box').textContent.trim()
     if (!t) { toast('标题不能为空', true); return }
@@ -1606,7 +1676,12 @@ function renderQueueStrip(s) {
   strip.textContent = ''
   const items = (s.queue || []).filter((q) => {
     const rid = q.message && q.message.source && (q.message.source.requestId || q.message.source.rpcId)
-    return !(rid && s.items.some((x) => x.kind === 'user' && x.rpcId === rid))  // 本机乐观气泡已显示的不重复
+    if (rid && s.items.some((x) => x.kind === 'user' && x.rpcId === rid)) return false  // rpcId 匹配的乐观气泡已显示
+    // 修复：队列广播的 source 是空对象（无 requestId），按文本兜底去重——
+    // 否则同一条消息既有乐观气泡又挂 chip，被领取后观感就是「chip 不消失」
+    const text = textOf(q.message && q.message.content)
+    if (!rid && text && s.items.some((x) => x.kind === 'user' && (x.pending || x.failed === false) && x.text === text)) return false
+    return true
   })
   strip.classList.toggle('show', items.length > 0)
   let qi = 0

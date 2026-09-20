@@ -439,7 +439,7 @@ button, .session-card, .tool-head, .sheet-row, .tab, .pick-ws, .ask-opt, .chip, 
 .new-input { margin:0 12px; background:var(--bg-card); border:.5px solid var(--line); border-radius:15px; padding:13px 15px; min-height:90px; font-size:16px; color:var(--text); outline:none; max-width:756px; }
 .new-input:empty::before { content:attr(data-ph); color:var(--text-3); }
 @media (min-width: 700px) {
-  .session-card, .resume-row { max-width: 756px; margin-left:auto; margin-right:auto; }
+  .swipe-wrap, .resume-row { max-width: 756px; margin-left:auto; margin-right:auto; }
   .pick-ws, .new-input, .start-btn { margin-left:auto; margin-right:auto; }
   .start-btn { display:block; }
 }
@@ -706,3 +706,19 @@ html.light .run-dot { background:#2563eb; }
 
 /* ============ 会话长按操作单 ============ */
 .sess-menu-title { padding:2px 20px 8px; font-size:15px; font-weight:700; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text); }
+
+/* ============ 会话卡左滑操作（iOS Mail 式） ============ */
+.swipe-wrap { position:relative; overflow:hidden; margin:0 12px 10px; border-radius:18px; }
+.swipe-actions { position:absolute; top:0; right:0; bottom:0; display:flex; border-radius:18px; overflow:hidden; }
+.swipe-act {
+  width:58px; border:none; color:#fff; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px;
+  font-size:10.5px; font-weight:600; min-height:100%; padding:0;
+}
+.swipe-act .sa-ico { font-size:17px; }
+.swipe-act:active { filter:brightness(1.25); }
+.swipe-wrap .session-card { margin:0; position:relative; z-index:1; transition:transform .25s var(--ease-out); background:var(--bg-card); }
+.swipe-wrap.dragging .session-card { transition:none; }
+/* 防长按选中文字/弹出系统菜单 */
+.session-card, .session-card * { -webkit-user-select:none; user-select:none; -webkit-touch-callout:none; }
+/* 宽屏居中目标改为 wrapper */
+@media (min-width:700px) { .swipe-wrap { max-width:756px; margin-left:auto; margin-right:auto; } }
