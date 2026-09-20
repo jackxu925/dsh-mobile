@@ -2605,14 +2605,18 @@ buildShell()
    #app 钉到可视高度，让输入框贴住键盘上沿；其余情况保持 CSS 的 100% 高度。
    注意：不要在启动时无条件钉像素高度 —— iOS 独立 PWA 首屏的 vv 值不可靠，
    会把整个页面压短、底部留出大片黑边。 */
+let keyboardLikelyOpen = false
 if (window.visualViewport) {
   const app = $('#app')
   const applyVV = () => {
     const vv = window.visualViewport
-    if (vv.height < window.innerHeight - 120) app.style.height = Math.round(vv.height) + 'px'
+    if (keyboardLikelyOpen && vv.height < window.innerHeight - 120) app.style.height = Math.round(vv.height) + 'px'
     else app.style.height = ''
   }
   window.visualViewport.addEventListener('resize', applyVV)
+  // 只在输入框聚焦（键盘弹起）时才钉高度：独立 PWA 首屏 vv 值不可靠
+  document.addEventListener('focusin', (e) => { if (e.target.closest && e.target.closest('.input-box, .new-input, .q-edit-box, .auth-input, input, [contenteditable]')) { keyboardLikelyOpen = true; applyVV() } })
+  document.addEventListener('focusout', () => { keyboardLikelyOpen = false; applyVV() })
 }
 window.addEventListener('hashchange', route)
 document.addEventListener('visibilitychange', () => {

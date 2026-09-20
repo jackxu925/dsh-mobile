@@ -32,7 +32,12 @@ body {
   overscroll-behavior: none;
   overflow: hidden;  /* 页面整体不滚动，滚动只发生在各 .scroll 容器内 */
 }
-#app { height: 100%; position: relative; }
+#app {
+  /* 独立 PWA（添加到主屏幕）下 iOS 会把布局视口算矮一截，100% 高度导致底部留出死区；
+     position:fixed + inset:0 贴住可视视口四条边，对这个 bug 免疫 */
+  position: fixed; inset: 0;
+  display: flex; flex-direction: column;
+}
 
 /* 键盘可达性：键盘/读屏操作时的焦点环 */
 button:focus-visible, [role="button"]:focus-visible, input:focus-visible, [contenteditable]:focus-visible {
