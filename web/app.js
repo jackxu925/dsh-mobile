@@ -215,6 +215,7 @@ const S = {
   current: null,            // open session id
   todoMode: false,          // 待办过滤
   listMode: (() => { try { return localStorage.getItem('dshm-list-mode') || 'time' } catch (e) { return 'time' } })(),  // 列表视图：time（按最近活跃平铺）| workspace（按工作区分组）
+  wsDrill: null,            // 「按工作区」视图下钻的工作区 id（null = 显示工作区列表）；'__other__' = 未分组
   es: { mux: null },
   wfClient: null,           // $events ready 帧下发的 clientId（waterfall 应答要用）
 }
@@ -929,6 +930,7 @@ function renderList() {
     .sort((a, b) => b.updatedAt - a.updatedAt)
   // 同步分段控件的选中态
   document.querySelectorAll('.seg-btn').forEach((b) => b.classList.toggle('sel', b.dataset.mode === S.listMode))
+  setListTitle(null)  // 大标题默认「会话」；下钻工作区时再覆盖为工作区名
   if (S.todoMode) {
     visible = visible.filter(hasPending)
     if (!visible.length) {
@@ -947,17 +949,25 @@ function renderList() {
     return
   }
   // 快速续聊：置顶「继续上次会话」（时间视图下第一张卡就是最近会话，无需重复）
-  if (!q && S.listMode !== 'time') {
+  if (!q && S.listMode !== 'time' && !S.wsDrill) {
     let lastId = null
     try { lastId = localStorage.getItem('dshm-last-open') } catch (e) {}
     const last = lastId && visible.find((s) => s.id === lastId)
     if (last) wrap.appendChild(resumeRow(last))
+  }
+  // 搜索结果是跨工作区的检索：平铺 + 卡片标注工作区，比钻取更直接
+  if (q) {
+    for (const s of visible) wrap.appendChild(sessionCard(s, true))
+    return
   }
   // 按时间视图：全部会话平铺、按最近活跃降序，卡片标注所属工作区
   if (S.listMode === 'time') {
     for (const s of visible) wrap.appendChild(sessionCard(s, true))
     return
   }
+  /* 按工作区视图：两级结构 ——
+     第一级只显示工作区行（不铺开里面的对话），按组内最近活跃降序；
+     点进去才看到该工作区下的会话卡，同样按最近活跃降序。 */
   const byWs = new Map()
   const ungrouped = []
   for (const s of visible) {
@@ -965,20 +975,60 @@ function renderList() {
     if (ws) { if (!byWs.has(ws.workspaceId)) byWs.set(ws.workspaceId, []); byWs.get(ws.workspaceId).push(s) }
     else ungrouped.push(s)
   }
-  const renderGroup = (name, iconName, list) => {
-    const g = el('div', 'ws-group')
-    g.appendChild(icon(iconName, 14))
-    g.appendChild(el('span', null, name))
-    wrap.appendChild(g)
-    for (const s of list) wrap.appendChild(sessionCard(s))
-  }
-  // 工作区分组按「组内最近活跃」排序：有最新动静的工作区排最前
   const wsSorted = S.workspaces
-    .map((ws) => ({ ws, list: byWs.get(ws.workspaceId) }))
+    .map((ws) => ({ id: ws.workspaceId, name: ws.title || ws.path, iconName: 'folder', list: byWs.get(ws.workspaceId) }))
     .filter((x) => x.list && x.list.length)
-    .sort((a, b) => Math.max(...b.list.map((s) => s.updatedAt)) - Math.max(...a.list.map((s) => s.updatedAt)))
-  for (const { ws, list } of wsSorted) renderGroup(ws.title || ws.path, 'folder', list)
-  if (ungrouped.length) renderGroup(S.workspaces.length ? '其他' : '会话', 'chat', ungrouped)
+  if (ungrouped.length) wsSorted.push({ id: '__other__', name: S.workspaces.length ? '其他' : '会话', iconName: 'chat', list: ungrouped })
+  // 工作区本身按「组内最近活跃」排序（visible 已按 updatedAt 降序，每组第一条即最新）
+  wsSorted.sort((a, b) => b.list[0].updatedAt - a.list[0].updatedAt)
+  // 下钻态：工作区没了（会话全部归档等）就退回列表
+  let drill = wsSorted.find((x) => x.id === S.wsDrill)
+  if (S.wsDrill && !drill) S.wsDrill = null
+  if (drill) {
+    const back = el('div', 'ws-back')
+    back.setAttribute('role', 'button'); back.setAttribute('tabindex', '0')
+    back.appendChild(el('span', 'wb-arrow', '‹'))
+    back.appendChild(el('span', null, '全部工作区'))
+    const backFn = () => { vibrate(8); S.wsDrill = null; renderList(); listScrollTop() }
+    back.onclick = backFn
+    back.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); backFn() } }
+    wrap.appendChild(back)
+    for (const s of drill.list) wrap.appendChild(sessionCard(s))
+    setListTitle(drill.name)
+    return
+  }
+  setListTitle(null)
+  for (const entry of wsSorted) wrap.appendChild(wsRow(entry))
+}
+/* 工作区行：图标 + 名称 + 最新会话 · 右侧会话数/时间，点按下钻 */
+function wsRow(entry) {
+  const row = el('div', 'ws-row')
+  row.setAttribute('role', 'button')
+  row.setAttribute('tabindex', '0')
+  row.setAttribute('aria-label', entry.name + '，' + entry.list.length + ' 个会话')
+  const ico = el('div', 'wsr-ico')
+  ico.appendChild(icon(entry.iconName, 18))
+  const mid = el('div'); mid.style.minWidth = '0'; mid.style.flex = '1'
+  mid.appendChild(el('div', 'wsr-title', entry.name))
+  mid.appendChild(el('div', 'wsr-sub', sessTitle(entry.list[0])))
+  const side = el('div', 'wsr-side')
+  side.appendChild(el('div', 'wsr-time', fmtTime(entry.list[0].updatedAt)))
+  side.appendChild(el('div', 'wsr-n', entry.list.length + ' 会话'))
+  const chev = el('span', 'wsr-chev', '›')
+  row.append(ico, mid, side, chev)
+  const open = () => { vibrate(8); S.wsDrill = entry.id; renderList(); listScrollTop() }
+  row.onclick = open
+  row.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open() } }
+  return row
+}
+/* 列表大标题：下钻时显示工作区名，否则回到「会话」 */
+function setListTitle(name) {
+  const t = document.querySelector('#view-list .big-title')
+  if (t) t.textContent = name || '会话'
+}
+function listScrollTop() {
+  const sc = $('#list-scroll')
+  if (sc) sc.scrollTop = 0
 }
 /* 置顶续聊卡：样式区别于普通会话卡，避免混淆 */
 function resumeRow(s) {
