@@ -176,6 +176,8 @@ button, .session-card, .tool-head, .sheet-row, .tab, .pick-ws, .ask-opt, .chip, 
 .badge.running { background:var(--accent-soft); color:#6aa6ff; }
 .badge.running .b-dot { background:#6aa6ff; animation:pulse 1.6s infinite; }
 .badge.done { background:rgba(255,255,255,.07); color:var(--text-3); }
+/* 「空闲」没有状态点：留着不可见的点会把 label 顶偏 ~6px，看着就没居中 */
+.badge.done .b-dot { display:none; }
 @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.25} }
 
 /* 置顶「继续上次会话」快捷卡 */
@@ -677,6 +679,9 @@ html.light .tk-row.now { background:rgba(59,130,246,.09); }
 /* FAB 新会话 */
 .fab { position:absolute; right:18px; bottom:20px; z-index:8; width:54px; height:54px; border-radius:17px; border:none; background:var(--accent); color:#fff; box-shadow:0 10px 26px rgba(59,130,246,.42); display:flex; align-items:center; justify-content:center; }
 .fab:active { transform:scale(.9); }
+/* 图标槽做成 flex 并把 svg 变块级：否则 svg 走 inline 基线对齐，重心会比按钮中心高 ~3px */
+.ic-slot { display:inline-flex; align-items:center; justify-content:center; }
+.ic-slot svg { display:block; }
 .fab svg { width:24px; height:24px; }
 /* 标题栏运行态 + 停止钮 */
 .subtitle.running { color:#6aa6ff; display:flex; align-items:center; gap:5px; }
@@ -698,6 +703,11 @@ html.light .tk-row.now { background:rgba(59,130,246,.09); }
 .meta-ico.think.live .td:nth-child(2) { animation-delay:.15s }
 .meta-ico.think.live .td:nth-child(3) { animation-delay:.3s }
 @keyframes meta-wave { 0%,100% { transform:translateY(0); opacity:.5 } 50% { transform:translateY(-2.2px); opacity:1 } }
+/* 工具卡头里的思考入口：占据原有的间隙，不额外撑高卡片 */
+.tool-head .meta-ico.think { width:26px; height:26px; border-radius:8px; margin-right:2px; flex:none; }
+/* 「只有思考没有正文」的兜底行（替代空泡泡） */
+.think-row { align-self:flex-start; display:flex; align-items:center; gap:2px; padding:0 2px; font-size:12.5px; color:var(--text-3); }
+.think-row .meta-ico { width:26px; height:26px; }
 /* 键盘弹起时输入框贴键盘上沿（指示条区被键盘覆盖，无需预留） */
 .composer-wrap:focus-within { padding-bottom:4px !important; }
 /* 浅色主题适配 */

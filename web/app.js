@@ -221,6 +221,7 @@ function sess(id) {
       todos: null,                     // 宿主 todos 投影（按 turn 重置）：[{content,status}] | null
       _todoCalls: new Set(),           // 已从时间线隐去的 todo_write 工具调用 id
       _pendingCalls: [],               // 待配对的 tool/call id 队列（结果消息不带 id，只能按顺序配）
+      _thinkBuf: '',                   // 攒着「只有思考没有正文」的 assistant 消息，挂到下一条内容上
       _todoTimer: null,                // 全部完成后自动收起的定时器
       _todoCollapsed: false,           // 任务条是否已收成一条细线
       _resolveLoad: null,              // loadHistory 的快照到达回调
@@ -317,6 +318,9 @@ function textOf(content) {
 
 function foldEvent(s, event, view) {
   const t = event.type, d = event.data || {}
+  // 折叠用的临时会话对象（loadEarlier 的分页缓冲）不一定带全字段，这里惰性补齐
+  if (!s._todoCalls) s._todoCalls = new Set()
+  if (!s._pendingCalls) s._pendingCalls = []
   switch (t) {
     case 'user/message': {
       if (d.source && d.source.kind && d.source.kind !== 'user') return  // 注入类上下文不显示
@@ -343,9 +347,12 @@ function foldEvent(s, event, view) {
       const reasoning = (m.content || []).filter((b) => b && (b.type === 'reasoning' || b.type === 'thinking')).map((b) => b.text || '').join('')
       if (!text.trim() && !reasoning.trim()) return
       endLive(s, d.turn, d.step)
-      s.items.push({ kind: 'assistant', text, reasoning, time: event.time })
       settleThinkDrawer(s)  // 抽屉若在直播这轮思考：熄灭「正在思考」徽标，正文保留
-      if (text.trim()) s.lastPreview = text
+      // 「只有思考、没有正文」是每个工具步骤前的常态（一轮里能有上百条）：
+      // 单独成条会渲染成一排空泡泡，所以先攒着，挂到下一条真正的内容上
+      if (!text.trim()) { s._thinkBuf = (s._thinkBuf || '') + reasoning; break }
+      s.items.push({ kind: 'assistant', text, reasoning: takeThinkBuf(s) + reasoning, time: event.time })
+      s.lastPreview = text
       break
     }
     case 'assistant/chunk': {
@@ -366,7 +373,7 @@ function foldEvent(s, event, view) {
       s._pendingCalls.push(d.callId)
       // todo_write 不入时间线：它的内容已经挂在顶部的常驻任务条上，卡片只会是重复的 JSON
       if (d.name === 'todo_write') { s._todoCalls.add(d.callId); break }
-      s.items.push({ kind: 'tool', callId: d.callId, name: d.name, args, state: 'run', result: '', time: event.time })
+      s.items.push({ kind: 'tool', callId: d.callId, name: d.name, args, state: 'run', result: '', time: event.time, reasoning: takeThinkBuf(s) })
       break
     }
     case 'tool/result': {
@@ -406,6 +413,9 @@ function foldEvent(s, event, view) {
       } else if (r.kind === 'interrupted') {
         s.items.push({ kind: 'sys', text: '⏹ 已中断', time: event.time })
       }
+      // 攒下来的思考若一直没等到承载它的内容（例如本轮只说了一句思考就结束），
+      // 落成一条极简的「思考过程」行，既不丢内容也不产生空泡泡
+      if (s._thinkBuf && s._thinkBuf.trim()) s.items.push({ kind: 'think', reasoning: takeThinkBuf(s), time: event.time })
       break
     }
     case 'session/title': if (d.title) s.title = d.title; break
@@ -442,7 +452,10 @@ function toolNode(item) {
   mid.appendChild(el('div', 'tool-sum', toolSummary(item)))
   const state = el('span', 'tool-state ' + (item.state === 'ok' ? 'ok' : item.state === 'err' ? 'err' : 'run'), item.state === 'ok' ? '✓' : item.state === 'err' ? '✕' : '…')
   const chev = el('span', 'tool-chev', '▶')
-  head.append(ico, mid, state, chev)
+  head.append(ico, mid)
+  // 这一步之前的思考挂在这张卡上（原本它是一条只有思考、没有正文的空泡泡）
+  if (item.reasoning && item.reasoning.trim()) head.appendChild(thinkDot(() => openThink({ text: item.reasoning, live: false })))
+  head.append(state, chev)
   const body = el('div', 'tool-body')
   const pre = el('pre')
   let detail = ''
@@ -755,6 +768,13 @@ function itemNode(s, item) {
       return m
     }
     case 'tool': return toolNode(item)
+    case 'think': {
+      // 兜底形态：只有思考没有正文，且后面没有内容可挂 → 一行极简入口，不是空泡泡
+      const row = el('div', 'think-row')
+      row.appendChild(thinkDot(() => openThink({ text: item.reasoning, live: false })))
+      row.appendChild(el('span', null, '思考过程'))
+      return row
+    }
     case 'sys': {
       const d = el('div', null, item.text)
       d.style.cssText = 'align-self:center;font-size:12.5px;color:var(--text-3);padding:4px 0'
@@ -802,6 +822,12 @@ function metaIcon(name, label) {
   d.setAttribute('aria-label', label || name)
   d.innerHTML = ICONS[name] || ''
   return d
+}
+/* 「只有思考没有正文」的 assistant 消息先攒在会话上，交给下一条内容承载（避免空泡泡） */
+function takeThinkBuf(s) {
+  const t = s._thinkBuf || ''
+  s._thinkBuf = ''
+  return t
 }
 /* 思考小图标（meta 行内）：live=紫色三点波浪，静态=灰色 */
 function thinkDot(onTap, live) {
@@ -1334,8 +1360,15 @@ async function loadEarlier(s) {
     const prevGap = sc ? sc.scrollHeight - sc.scrollTop : 0
     const v = await rpc('session/page', { request: { address: followAddress(s.id), throughSeq: s.oldestSeq - 1, maxMessages: 40 } })
     const older = []
-    const tmp = { items: older, callArgs: s.callArgs, live: null }
+    const tmp = { items: older, callArgs: s.callArgs, live: null, _todoCalls: new Set(), _pendingCalls: [], _thinkBuf: '' }
     for (const rec of v.records || []) foldEvent(tmp, rec.event || rec)
+    // 这一页末尾若停在「只有思考没有正文」的消息上，它属于下一页的第一条内容，补给那个条目
+    const dangling = tmp._thinkBuf || ''
+    if (dangling.trim()) {
+      const head = s.items[0]
+      if (head && (head.kind === 'tool' || head.kind === 'assistant')) head.reasoning = dangling + (head.reasoning || '')
+      else older.push({ kind: 'think', reasoning: dangling })
+    }
     s.items = older.concat(s.items)
     s.hasMore = !!v.hasMore
     if (v.records && v.records.length) {
@@ -1620,6 +1653,7 @@ Mux.handlers.follow = (v, meta) => {
     s.callArgs = new Map()
     s._todoCalls = new Set()
     s._pendingCalls = []
+    s._thinkBuf = ''
     const records = v.records || []
     for (const rec of records) foldEvent(s, rec.event || rec)
     for (const p of pend) if (!s.items.some((i) => i.rpcId === p.rpcId)) s.items.push(p)
