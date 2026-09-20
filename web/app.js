@@ -616,8 +616,23 @@ function chatScrollEl() { return $('#chat-scroll') }
 function nearBottom(sc) { return sc.scrollHeight - sc.scrollTop - sc.clientHeight < 120 }
 function scrollBottom(sc, force) { if (force || nearBottom(sc)) sc.scrollTop = sc.scrollHeight }
 
-/* 「↓ 新消息」悬浮提示：用户翻历史时新内容到达，不强行拉回，只给入口 */
-function showNewMsgPill() { const p = $('#new-msg-pill'); if (p) p.classList.add('show') }
+/* 「↓」pill 状态机：不在底部→显示「↓」；有新内容→「↓ 新消息」；回到底部→隐藏 */
+function updateJumpPill() {
+  const p = $('#new-msg-pill')
+  if (!p) return
+  const sc = chatScrollEl()
+  if (!sc || !S.current) { p.classList.remove('show'); return }
+  const away = !nearBottom(sc)
+  const hasNew = !!sess(S.current)._newBelow
+  if (!away) { sess(S.current)._newBelow = false; p.classList.remove('show'); return }
+  p.textContent = hasNew ? '↓ 新消息' : '↓'
+  p.classList.add('show')
+}
+function showNewMsgPill() {
+  if (!S.current) return
+  sess(S.current)._newBelow = true
+  updateJumpPill()
+}
 function hideNewMsgPill() { const p = $('#new-msg-pill'); if (p) p.classList.remove('show') }
 
 /* 图片查看器 */
@@ -650,11 +665,8 @@ function renderChat(s, forceScroll) {
   if (!sc) return
   const stick = nearBottom(sc) || forceScroll
   sc.textContent = ''
-  if (s.hasMore) {
-    const more = el('button', 'load-earlier', '加载更早的消息')
-    more.onclick = () => loadEarlier(s)
-    sc.appendChild(more)
-  }
+  // 更早的消息滚动到顶自动加载（无感），不再给用户一个按钮
+  if (s.hasMore) sc.appendChild(el('div', 'auto-load-hint', '· 上滑加载更早 ·'))
   let lastDay = ''
   for (const item of s.items) {
     if (item.time) {
@@ -1222,23 +1234,28 @@ async function loadHistory(s) {
   })
 }
 async function loadEarlier(s) {
+  if (s._loadingEarlier) return
   if (s.oldestSeq === null || s.oldestSeq <= 0) return
-  // 记录当前视口锚点：插入旧消息后按滚动高度差恢复，避免阅读位置跳变
-  const sc = chatScrollEl()
-  const prevGap = sc ? sc.scrollHeight - sc.scrollTop : 0
-  const v = await rpc('session/page', { request: { address: followAddress(s.id), throughSeq: s.oldestSeq - 1, maxMessages: 40 } })
-  const older = []
-  const tmp = { items: older, callArgs: s.callArgs, live: null }
-  for (const rec of v.records || []) foldEvent(tmp, rec.event || rec)
-  s.items = older.concat(s.items)
-  s.hasMore = !!v.hasMore
-  if (v.records && v.records.length) {
-    const first = v.records[0].event || v.records[0]
-    s.oldestSeq = typeof first.seq === 'number' ? first.seq : s.oldestSeq
+  s._loadingEarlier = true
+  try {
+    // 记录当前视口锚点：插入旧消息后按滚动高度差恢复，避免阅读位置跳变
+    const sc = chatScrollEl()
+    const prevGap = sc ? sc.scrollHeight - sc.scrollTop : 0
+    const v = await rpc('session/page', { request: { address: followAddress(s.id), throughSeq: s.oldestSeq - 1, maxMessages: 40 } })
+    const older = []
+    const tmp = { items: older, callArgs: s.callArgs, live: null }
+    for (const rec of v.records || []) foldEvent(tmp, rec.event || rec)
+    s.items = older.concat(s.items)
+    s.hasMore = !!v.hasMore
+    if (v.records && v.records.length) {
+      const first = v.records[0].event || v.records[0]
+      s.oldestSeq = typeof first.seq === 'number' ? first.seq : s.oldestSeq
+    }
+    renderChat(s)
+    if (sc) sc.scrollTop = sc.scrollHeight - prevGap
+  } finally {
+    s._loadingEarlier = false
   }
-  renderChat(s)
-  if (sc) sc.scrollTop = sc.scrollHeight - prevGap
-  toast('已加载 ' + older.length + ' 条')
 }
 
 /* ================= 实时流（WebSocket 下行） ================= */
@@ -1602,6 +1619,7 @@ async function openSession(id, force) {
   try { localStorage.setItem('dshm-last-open', id) } catch (e) {}  // 供列表页「继续上次会话」
   $('#chat-title').textContent = sessTitle(s)
   showView('chat')
+  s._newBelow = false
   hideNewMsgPill()
   const sc = chatScrollEl()
   sc.textContent = ''
@@ -2470,16 +2488,22 @@ function buildShell() {
   }
   connPill.onclick = manualReconnect
   connPill.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); manualReconnect() } }
-  // 「↓ 新消息」pill：点按回到底部
+  // 「↓」pill：不在底部时始终显示（回到底部）；有新消息时升级为「↓ 新消息」
   $('#new-msg-pill').onclick = () => {
     const sc = chatScrollEl()
     if (sc) sc.scrollTop = sc.scrollHeight
-    hideNewMsgPill()
+    if (S.current) sess(S.current)._newBelow = false
+    updateJumpPill()
   }
-  // 滚回底部时自动隐藏 pill
   $('#chat-scroll').addEventListener('scroll', () => {
     const sc = chatScrollEl()
-    if (sc && nearBottom(sc)) hideNewMsgPill()
+    if (!sc) return
+    updateJumpPill()
+    // 滚动到顶部附近：自动加载更早（无感，无按钮）
+    if (sc.scrollTop < 64 && S.current) {
+      const s = sess(S.current)
+      if (s.hasMore && !s._loadingEarlier) loadEarlier(s).catch(() => {})
+    }
   }, { passive: true })
   // 聊天区点击委派：代码块复制 / 链接拉起浏览器 / 图片放大
   $('#chat-scroll').addEventListener('click', (e) => {

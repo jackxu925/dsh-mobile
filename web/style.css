@@ -732,3 +732,6 @@ html.light .run-dot { background:#2563eb; }
 /* 独立 PWA 的 home 指示条区适配：FAB 与提示 pill 抬到指示条上方（后写覆盖） */
 .fab { bottom: calc(18px + env(safe-area-inset-bottom, 0px)); }
 .new-msg-pill { bottom: calc(92px + env(safe-area-inset-bottom, 0px)); }
+
+/* 到顶自动加载的轻提示（无按钮，纯氛围） */
+.auto-load-hint { align-self:center; font-size:11.5px; color:var(--text-3); padding:2px 0 6px; opacity:.8; }
