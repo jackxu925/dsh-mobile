@@ -306,7 +306,8 @@ html.light .ws-row .wsr-n { background:rgba(15,23,42,.06); }
 .bubble ul, .bubble ol { margin:4px 0 8px 20px; }
 .bubble li { margin:2px 0; }
 .bubble h1,.bubble h2,.bubble h3,.bubble h4 { font-size:16px; margin:10px 0 6px; text-wrap:balance; }
-.bubble a { color:#6aa6ff; }
+.bubble a { color:#6aa6ff; text-decoration:underline; text-underline-offset:2.5px; text-decoration-color:rgba(106,166,255,.45); }
+.msg.user .bubble a { color:#fff; text-decoration-color:rgba(255,255,255,.55); }
 .bubble blockquote { border-left:3px solid var(--line); padding-left:10px; color:var(--text-2); margin:6px 0; }
 .bubble .md-table { display:block; overflow-x:auto; background:rgba(0,0,0,.4); border-radius:10px; padding:10px 12px; margin:6px 0; font-family:var(--mono); font-size:12px; line-height:1.6; white-space:pre; color:var(--text-2); }
 
@@ -597,16 +598,18 @@ html.light .copy-pill {
   border-color: rgba(15,23,42,.14);
   box-shadow: 0 8px 26px rgba(15,23,42,.2);
 }
-/* 弱对比文字蓝 #6aa6ff → 浅底下加深 */
+/* 弱对比文字蓝 #6aa6ff → 浅底下加深（这组全是文字/图标，走 color；
+   曾误写成 background，浅色模式下链接/徽章/chip 全被刷成实心蓝底） */
 html.light .bubble a,
 html.light .badge.running,
-html.light .badge.running .b-dot,
 html.light .tool-ico,
 html.light .tool-state.run,
 html.light .m-meta .retry-send,
 html.light .running-bar,
 html.light .chip.sel,
-html.light .cmd-more,
+html.light .cmd-more { color: #2563eb; }
+html.light .bubble a { text-decoration-color: rgba(37,99,235,.45); }
+/* 状态点是画出来的（background 着色），保持加深 */
 html.light .badge.running .b-dot { background: #2563eb; }
 /* 白底上消失的"白纱"元素 */
 html.light .badge.done { background: rgba(15,23,42,.07); }

@@ -132,15 +132,26 @@ try { BARE_URL_RE = new RegExp('(?<!\\]\\()(https?:\\/\\/[^\\s<>"\')\\]`*\\u0080
 catch (e) { BARE_URL_RE = /(https?:\/\/[^\s<>"')\]`*\u0080-\uffff]+)/g }
 /* 句尾 ASCII 标点不属于链接（中文标点已被字符类挡在外面），移出 <a> 之外 */
 const URL_TRAIL_RE = /[.,;:!?…。．，、）)；：！？」』]+$/
-function anchorize(u) {
-  let url = u, trail = ''
-  const t = url.match(URL_TRAIL_RE)
-  if (t) { trail = t[0]; url = url.slice(0, -trail.length) }
-  return '<a href="' + url + '" target="_blank" rel="noopener">' + url + '</a>' + trail
+/* 在「未转义」的原始文本上切分 URL，再分段转义。
+ * 若先 esc() 再匹配，文本里的引号会变成 &quot;，而 & 不在排除列表里，
+ * 实体会被整体吞进 URL —— 实测 `href="http://x"` 里的闭引号被吞成 …x%22。 */
+function linkifyRaw(text) {
+  const re = new RegExp(BARE_URL_RE.source, 'g')  // 独立实例，避免共享 lastIndex
+  let out = '', last = 0, m
+  while ((m = re.exec(text))) {
+    let url = m[0], trail = ''
+    const t = url.match(URL_TRAIL_RE)
+    if (t) { trail = t[0]; url = url.slice(0, -trail.length) }
+    if (url.replace(/^https?:\/\//, '').length === 0) continue  // 退化匹配（如 "http://."）不当链接
+    out += esc(text.slice(last, m.index))
+    out += '<a href="' + esc(url) + '" target="_blank" rel="noopener">' + esc(url) + '</a>' + esc(trail)
+    last = m.index + m[0].length
+  }
+  return out + esc(text.slice(last))
 }
-/* 用户气泡专用：转义 + 裸 URL 转链接（保留换行交给 CSS pre-wrap） */
+/* 用户气泡专用：裸 URL 转链接（保留换行交给 CSS pre-wrap） */
 function linkifyText(text) {
-  return esc(text).replace(BARE_URL_RE, anchorize)
+  return linkifyRaw(text)
 }
 
 /* 极简 markdown：代码块/行内码/粗体/斜体/链接/标题/列表/引用/表格降级 */
@@ -150,9 +161,9 @@ function md(src) {
     blocks.push('<div class="code-wrap"><button class="code-copy" type="button">复制</button><pre><code>' + esc(code.replace(/\n$/, '')) + '</code></pre></div>')
     return '' + (blocks.length - 1) + ''
   })
-  s = esc(s)
-  // 裸 URL 自动转可点链接（在 md 链接语法之前；排除 ) ] 引号等，不吞 [text](url) 里的地址）
-  s = s.replace(BARE_URL_RE, anchorize)
+  // 裸 URL 自动转可点链接（在原始文本上切分再分段转义；在 md 链接语法与粗体之前，
+  // 后续的 `**` 不会进 href —— 详见 linkifyRaw 注释）
+  s = linkifyRaw(s)
   s = s.replace(/`([^`\n]+)`/g, '<code>$1</code>')
   s = s.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
   s = s.replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
