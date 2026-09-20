@@ -236,6 +236,8 @@ const S = {
   todoMode: false,          // 待办过滤
   listMode: (() => { try { return localStorage.getItem('dshm-list-mode') || 'time' } catch (e) { return 'time' } })(),  // 列表视图：time（按最近活跃平铺）| workspace（按工作区分组）
   wsDrill: null,            // 「按工作区」视图下钻的工作区 id（null = 显示工作区列表）；'__other__' = 未分组
+  listLoaded: false,        // 首次 session/list 是否已落地（空态分岔用）
+  staleNotice: null,        // 断线期间失效的审批/提问计数（重连后挂条提示，可手动关掉）
   es: { mux: null },
   wfClient: null,           // $events ready 帧下发的 clientId（waterfall 应答要用）
 }
@@ -965,7 +967,24 @@ function renderList() {
     return
   }
   if (!visible.length) {
-    wrap.appendChild(el('div', 'empty-state', '还没有会话\n点下方「新会话」开始'))
+    // 空态按语境分岔：搜了没命中 ≠ 没有会话（后者会被读成「我的会话没了」）；
+    // 冷启动列表未落地时也不给结论，给加载态
+    if (q) {
+      const box = el('div', 'empty-state')
+      box.appendChild(el('div', null, '没有标题或路径含「' + q + '」的会话'))
+      box.appendChild(el('div', 'empty-sub', '搜索范围：标题与工作区路径，暂不覆盖消息内容'))
+      const clear = el('button', 'empty-clear', '清除搜索')
+      clear.type = 'button'
+      clear.onclick = () => { const inp = $('#search'); if (inp) { inp.value = ''; inp.dispatchEvent(new Event('input', { bubbles: true })) } vibrate(8) }
+      box.appendChild(clear)
+      wrap.appendChild(box)
+      return
+    }
+    if (!S.listLoaded) {
+      wrap.appendChild(el('div', 'empty-state', '正在加载会话…'))
+      return
+    }
+    wrap.appendChild(el('div', 'empty-state', '还没有会话\n点右下角 ＋ 新建'))
     return
   }
   // 「继续上次会话」置顶入口已移除：两级工作区视图 + 「最近活跃」时间视图都能一步直达最近对话
@@ -1253,7 +1272,8 @@ function refreshBadges() {
     chip.classList.toggle('act', S.todoMode)
   } else {
     chip.style.display = 'none'
-    S.todoMode = false
+    // 归零退出筛选时必须重渲染：否则列表停留在筛选后的 DOM，而唯一能解除筛选的 chip 已消失（死局）
+    if (S.todoMode) { S.todoMode = false; renderList(); updateTabs() }
   }
 }
 
@@ -1400,6 +1420,7 @@ async function loadBase() {
     }
     // workspace/follow 已提供权威分组（含真实标题/顺序/归档）；仅在还没有时退回 cwd 推导
     if (!S.workspaces.length) deriveWorkspaces()
+    S.listLoaded = true
     setConn('online')
     renderList()
   } catch (e) {
@@ -1469,7 +1490,7 @@ function setConn(state) {
  *   session/follow  — 当前会话的事件 + 流式回复（首帧 snapshot）
  *   $events         — api-session/* 通知 + 审批/提问 waterfall（首帧 ready 带 clientId） */
 const Mux = {
-  ws: null, retry: 0, timer: null, closed: false,
+  ws: null, retry: 0, timer: null, closed: false, everConnected: false,
   streams: new Map(),   // streamId → {kind, sessionId?}
   followId: null,       // 当前 follow 的 sessionId
   handlers: {},         // kind → (value, meta) => void
@@ -1482,9 +1503,38 @@ const Mux = {
     S.es.mux = ws
     ws.addEventListener('open', () => {
       this.retry = 0
-      // 重连后各流重放基线帧：清掉待处理审批/提问（waterfall 只投递给当时在线的客户端）
-      for (const s of S.sessions.values()) { s.approvals.clear(); s.questions.clear() }
+      // 重连后的审批/提问：清空旧条目（旧 clientId 上的投递已死），但宿主会把未决
+      // waterfall 重放给新连接——所以先记账，留 2.5s 重放窗口，只对「没回来」的条目
+      // 挂失效提示。这样两种宿主行为都正确：重放了→卡片原样回来、不打扰；
+      // 没重放→输入区上方常驻交代「N 项失效，在桌面端处理」，而不是无声蒸发。
+      const firstConnect = !this.everConnected
+      const pendingBefore = new Map()
+      for (const s of S.sessions.values()) {
+        const ids = new Set()
+        for (const a of s.approvals.values()) if (!a.outcome) ids.add(a.eventId)
+        for (const qq of s.questions.values()) if (!qq.outcome) ids.add(qq.eventId)
+        if (ids.size) pendingBefore.set(s.id, ids)
+        s.approvals.clear(); s.questions.clear()
+      }
+      this.everConnected = true
       refreshBadges()
+      if (!firstConnect && pendingBefore.size) {
+        setTimeout(() => {
+          let lost = 0
+          for (const [sid, ids] of pendingBefore) {
+            const s2 = S.sessions.get(sid)
+            if (!s2) { lost += ids.size; continue }
+            for (const id of ids) {
+              const ap = s2.approvals.get(id), qq = s2.questions.get(id)
+              const back = (ap && !ap.outcome) || (qq && !qq.outcome)
+              if (!back) lost++
+            }
+          }
+          if (lost > 0) { S.staleNotice = { n: lost, at: Date.now() }; renderStaleStrip() }
+        }, 2500)
+      }
+      // 清掉的审批卡要从当前会话里真正消失（否则卡上「允许/拒绝」还点得到，与提示条自相矛盾）
+      if (S.current) { const cur = sess(S.current); if (cur.loaded) renderChat(cur) }
       this.streams.clear()
       this.openAll()
     })
@@ -1887,6 +1937,7 @@ function refreshChatChrome(s) {
   }
   updateCtxBar(s)
   renderTaskBar(s)
+  renderStaleStrip()
   renderQueueStrip(s)
   // 输入框 placeholder 明示发送模式（运行中按设置排队/插话；长按发送反向）
   const input2 = $('#chat-input')
@@ -1923,6 +1974,24 @@ function fmtDur(ms) {
   if (m < 60) return m + ' 分钟'
   return (m / 60).toFixed(1) + ' 小时'
 }
+
+/* 断线期间失效的审批/提问：常驻交代条（可关）。输入区上方，与排队条同一视觉语言 */
+function renderStaleStrip() {
+  const strip = $('#stale-strip')
+  if (!strip) return
+  const n = S.staleNotice ? S.staleNotice.n : 0
+  if (!n) { strip.style.display = 'none'; return }
+  strip.style.display = ''
+  strip.textContent = ''
+  strip.appendChild(el('span', 'st-ico', '⚠'))
+  const tx = el('span', 'st-tx', n + ' 项审批/提问在断线期间失效，本次无法在手机上作答')
+  strip.appendChild(tx)
+  const x = el('button', 'st-x', '知道了')
+  x.type = 'button'
+  x.setAttribute('aria-label', '关闭提示')
+  x.onclick = () => { S.staleNotice = null; renderStaleStrip(); vibrate(8) }
+  strip.appendChild(x)
+}
 /* ---- 排队/插话 chip 条（输入框上方固定，点按出操作单） ---- */
 function renderQueueStrip(s) {
   const strip = $('#q-strip')
@@ -1941,13 +2010,18 @@ function renderQueueStrip(s) {
   let qi = 0
   for (const q of items) {
     qi++
-    const text = textOf(q.message && q.message.content)
-    if (!text.trim()) continue
+    const content = (q.message && q.message.content) || []
+    const text = textOf(content)
+    const nImg = content.filter((b) => b && b.type === 'image').length
+    // 无文本且有图片也要有代表（修复：纯图片的排队消息此前对话流和 chip 两头都不显示，
+    // 直到本轮结束才「凭空出现」，用户会以为截图没发出去）
+    const label = text.trim() ? text : (nImg ? '图片 × ' + nImg : '')
+    if (!label) continue
     const chip = el('button', 'q-chip' + (q.placement === 'steering' ? ' steer' : ''))
     chip.type = 'button'
     const dot = el('span', 'q-dot')
     const tag = el('span', 'q-tag', q.placement === 'steering' ? '插话' : '排队 #' + qi)
-    const tx = el('span', 'q-text', text)
+    const tx = el('span', 'q-text', label)
     chip.append(dot, tag, tx)
     onTap(chip, () => openQSheet(s, q))  // 排队 chip 也在输入区：同樣走 touchend 派发
     strip.appendChild(chip)
@@ -2183,9 +2257,11 @@ async function startSession() {
 }
 
 /* ================= 发消息 / 停止 ================= */
-async function sendPrompt(id, text, images, forceMode) {
+/* reuseRpcId：失败重试时沿用首次的 requestId —— 宿主按 requestId 幂等去重，
+ * 换新 id 等于放弃去重：首次其实已被受理、只是回包迟到时，重试会让同一条指令真的执行两遍 */
+async function sendPrompt(id, text, images, forceMode, reuseRpcId) {
   const s = sess(id)
-  const rpcId = uuid()
+  const rpcId = reuseRpcId || uuid()
   const item = { kind: 'user', text: text || '', images: images && images.length ? images : null, time: Date.now(), pending: true, failed: false, rpcId }
   s.items.push(item)
   s.updatedAt = Date.now()
@@ -2232,7 +2308,7 @@ async function sendPrompt(id, text, images, forceMode) {
 function retrySend(s, item) {
   const i = s.items.indexOf(item)
   if (i >= 0) s.items.splice(i, 1)
-  sendPrompt(s.id, item.text, item.images)
+  sendPrompt(s.id, item.text, item.images, null, item.rpcId)  // 沿用原 id：宿主幂等去重，避免双发
 }
 async function cancelSession(id) {
   try { await rpc('session/cancel', { request: { sessionId: id } }); toast('已发送停止 ■') } catch (e) { toast(e.message, true) }
@@ -2732,6 +2808,7 @@ function buildShell() {
     </div>
     <div class="chat-scroll" id="chat-scroll"></div>
     <div class="composer-wrap">
+      <div class="stale-strip" id="stale-strip" style="display:none"></div>
       <div class="q-strip" id="q-strip"></div>
       <div class="attach-strip" id="attach-strip"></div>
       <div class="composer">
@@ -3100,4 +3177,7 @@ route()
 loadBase()
 Mux.connect()
 setInterval(() => { if (S.connState !== 'online') loadBase() }, 15000)
+/* 调试/端到端验证钩子：真实验证需要触达闭包内部（如主动断开 WS 走真实重连路径）。
+   页面脚本本就同源同权，不构成新的暴露面。 */
+try { window.__dsh = { S, Mux, sess } } catch (e) {}
 })()
