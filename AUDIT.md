@@ -108,6 +108,18 @@
 | 67 | --accent 同时当深底文字色和白字填充色：用户气泡/FAB/主按钮白字仅 3.68:1；「发送中」再压 opacity:.62 到 2.84:1 | 拆 --accent-fill(#2563eb，白字 5.17:1) 专供填充，7 处调用点换 token（深色下观感几乎无差别）；pending 气泡去掉 opacity、保留虚线描边表达状态 | ✅ |
 | 68 | 重连静默清空待审批/提问（评审 P0-1）。实测修正其前提：当前宿主会把未决 waterfall 重放给新连接（同 eventId 回到新 clientId），直接清空+挂「已失效」反而说谎 | 清空旧条目后留 2.5s 重放窗口再记账：重放回来的卡片原样恢复、不打扰（实测 ✓）；真正没回来的才挂「N 项失效，在桌面端处理」常驻条（注入宿主不认识的孤儿审批实测 ✓，可关闭）；清空后当前会话立即重渲染，避免死卡上还留着可点的允许/拒绝 | ✅ |
 | 69 | 「待办」筛选归零后退不出：chip 隐藏时 todoMode 置 false 但不重渲染，列表停留在筛选后 DOM，唯一解除入口已消失 | refreshBadges 归零分支补 renderList()+updateTabs()；经真实调用路径（路由往返）实测 todoMode 清除、79 卡恢复、空态消失 | ✅ |
+| 70 | markdown 四级标题同字号（16px），Agent 的结构化回答被压平 | 三级字号（h1 19 / h2 17 / h3 15.5 / h4 14+次级色）并收紧层级边距；实测计算样式逐级递减 | ✅ |
+| 71 | 表格降级成竖线等宽文本，390px 上列永远对不齐 | flushTable 输出真 <table>：--- 分隔行判定表头、数字列自动右对齐等宽、横向滚动容器、发丝分隔；实测 th 6px10px / td.num 右对齐 / overflow-x auto | ✅ |
+| 72 | 注释承诺的斜体没实现，~~删除~~ 与 ![]() 原样漏出 | 补 em / del / 图片语法（图片渲染为 [图]链接，不残留感叹号）；乘号边界（5*3*2）不误伤 | ✅ |
+| 73 | 触控热区大面积 <44px（最小 20px 的图片删除 ×） | 十二类小控件用透明 ::after 扩热区（视觉尺寸不变）：× 20→44、思考/复制 26-30→42-44、停止/分段 34→44、发送/＋/待办 38→44 | ✅ |
+| 74 | 会话页断线只改副标题文案，无重连入口，与列表页口径不一 | 输入区上方断线条：「连接已断开 · 后台每 15 秒自动重试」+「立即重连」（与列表页共用 manualReconnect）；实测真实断 WS → 条出现 → 重连后消失 | ✅ |
+| 75 | 浮层关着的还在 Tab 序里，开着的 aria-hidden=true 读屏反而读不到，无 Esc | ovSet() 统一管理：关闭时 visibility:hidden 移出 Tab 序 + aria-hidden 双向同步（六个浮层全接入）；Esc 关闭最上层（栈序跟踪）；实测 Enter 打开面板、Esc 逐层关闭 | ✅ |
+| 76 | 五类高频控件（chips/ask-opt/sheet-row/act-row/pick-ws）键盘摸不到；分段控件 role=tab 无 aria-selected；任务条有 role 却只绑 onclick | btnize() 补 role+tabindex + 全局 Enter/Space 派发（自带处理的跳过防双发）；分段控件改 aria-pressed 并随选中同步；任务条补键盘；实测菜单行 focus+Enter 打开模型面板 | ✅ |
+| 77 | 「运行中蓝」#6aa6ff 硬编码 21 处无 token，浅色补丁各写一条还漏 7 处；杂色 #8b5cf6/#ffd48a 无主 | --info token（深 #6aa6ff / 浅 #2563eb）全量替换，浅色 8 条 color 补丁删除自动适配；#8b5cf6→--purple、#ffd48a→--warn-bright 归位；实测浅色计算值 #2563eb | ✅ |
+| 78 | 死代码与死样式：initLongPressCopy 全文件无调用、tabbar/running-bar/load-earlier/tk-dot 无对应 DOM | 全部删除（app.js -45 行、style.css -40 行），残留引用一并清理 | ✅ |
+| 79 | 滑动动作与操作单用 emoji 当图标（✏️⚡🗑⑂📦），与线性 SVG 不同源，无 emoji 字体时变空框 | 新增 trash/fork/archive 三个同风格 SVG，滑动动作与全部操作单换 SVG；toast 文案里的装饰符号一并清除 | ✅ |
+| 80 | 工具卡输出静默截断在 4000 字符，且复制只能手动框选 | 超限显示「已截断」提示 + 每张卡「复制」按钮取完整输出；实测 48/48 卡片带复制钮 | ✅ |
+| 81 | 复制链路：execCommand 失败也提示「已复制 ✓」；审批 outcome 拼出「已decided-elsewhere」；错误 toast nowrap 截断；预设加载失败静默；无工作区留着必然报错的主按钮 | copyText 汇报真实成败（全部调用点按结果提示）；outcome 全量中文映射；toast 允许换行（pre-wrap+max-height）；预设失败给出交代；无工作区时禁用按钮并说明 | ✅ |
 | 60 | 空闲会话长按发送：toast 说「本次将插话发送 ⚡」但实际以 queue 发出（空闲时 queue/steer 无差别）——承诺与行为不符 | 长按定时器回调检查 `s.running`：空闲按普通发送处理、不弹模式 toast；运行中行为不变（反向 + toast + 震动）。端到端实证见 `verify/REPORT.md`（T2b/T4b） | ✅ |
 | 61 | 空输入长按发送：震动 + toast「本次将插话发送」后 `doSend` 空输入静默早退——被提示却什么都没发 | 定时器回调先判空（文本 + pendingImages），为空直接取消：不震动、不提示、不发。实证见 `verify/REPORT.md`（T7/T7b） | ✅ |
 | 62 | 打开/关闭「排队操作单」各抛一次 `Cannot read properties of null (reading 'classList')`：`openQSheet`/`closeQSheet` 取 `$('#q-sheet')`，但 buildShell 静态结构里该节点只有 class 没有 id（会话菜单的 `sess-sheet` 是有 id 的，此处漏加）。抽屉滑入靠 `.sheet-overlay.open .sheet` 后代选择器，视觉碰巧正常，异常一直静默 | 节点补 `id="q-sheet"`。鼠标路径验证（`verify/mouse-click.mjs` M13/M15）首次捕获并实证，修复后全程零 pageerror | ✅ |

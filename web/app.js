@@ -27,6 +27,14 @@ const uuid = () => crypto.randomUUID ? crypto.randomUUID() :
   })
 const tz = () => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone } catch (e) { return undefined } }
 const vibrate = (ms) => { try { if (navigator.vibrate) navigator.vibrate(ms) } catch (e) {} }
+/* 语义按钮化：div/span 控件补 role=button + tabindex，键盘走全局 Enter/Space 派发 */
+function btnize(node, fn) {
+  if (!node) return node
+  node.setAttribute('role', 'button')
+  node.setAttribute('tabindex', '0')
+  if (fn) node.onclick = fn
+  return node
+}
 /* 键盘弹起时点输入区附近的按钮：touchend 后 iOS 先收键盘（#app 高度复原、按钮位移），
    浏览器随即将合成的 click 判定为「点到了别处」直接丢弃 —— 表现就是第一次点没反应、要点两次。
    这里统一改为 touchend 就执行动作（手指没滑动才算点按），并吃掉随后的合成 click；
@@ -52,12 +60,18 @@ function onTap(node, fn) {
 }
 /* 复制文本：clipboard API 在非安全上下文（http over Tailscale）不可用，降级 execCommand */
 function copyText(t, done) {
-  if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(t).then(done, done); return }
+  // done(ok)：汇报真实成败——此前 execCommand 抛错也照样回调，失败同样提示「已复制 ✓」
+  const fin = (ok) => { if (done) done(ok) }
+  if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(t).then(() => fin(true), () => fallbackCopy(t, fin)); return }
+  fallbackCopy(t, fin)
+}
+function fallbackCopy(t, fin) {
   const ta = document.createElement('textarea')
   ta.value = t; ta.style.cssText = 'position:fixed;opacity:0;pointer-events:none'
   document.body.appendChild(ta); ta.select()
-  try { document.execCommand('copy') } catch (e) {}
-  ta.remove(); done()
+  let ok = false
+  try { ok = document.execCommand('copy') } catch (e) { ok = false }
+  ta.remove(); fin(ok)
 }
 
 /* ---- 内联 SVG 图标（SF Symbols 风格线性字形；emoji 是"套壳感"来源） ---- */
@@ -81,6 +95,9 @@ const ICONS = {
   robot: SVG_OPEN + '<rect x="4" y="8" width="16" height="12" rx="2"/><path d="M12 8V4M8 4h8"/><circle cx="9" cy="13" r="1" fill="currentColor" stroke="none"/><circle cx="15" cy="13" r="1" fill="currentColor" stroke="none"/></svg>',
   globe: SVG_OPEN + '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a13.5 13.5 0 0 1 0 18M12 3a13.5 13.5 0 0 0 0 18"/></svg>',
   wrench: SVG_OPEN + '<path d="M14.7 6.3a4.5 4.5 0 0 0-6 6L3 18l3 3 5.7-5.7a4.5 4.5 0 0 0 6-6L14 13l-3-3 3.7-3.7z"/></svg>',
+  trash: SVG_OPEN + '<path d="M4 7h16M9 7V5a1.5 1.5 0 0 1 1.5-1.5h3A1.5 1.5 0 0 1 15 5v2m3 0-.8 12a2 2 0 0 1-2 1.9H8.8a2 2 0 0 1-2-1.9L6 7"/><path d="M10 11v6M14 11v6"/></svg>',
+  fork: SVG_OPEN + '<circle cx="6" cy="5" r="2.2"/><circle cx="18" cy="5" r="2.2"/><circle cx="12" cy="19" r="2.2"/><path d="M6 7.2v2a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3v-2M12 12.2v4.6"/></svg>',
+  archive: SVG_OPEN + '<rect x="3" y="4" width="18" height="4.5" rx="1.5"/><path d="M5 8.5V19a1.5 1.5 0 0 0 1.5 1.5h11A1.5 1.5 0 0 0 19 19V8.5M10 12.5h4"/></svg>',
   sliders: SVG_OPEN + '<path d="M4 8h16M4 16h16"/><circle cx="9" cy="8" r="2.2"/><circle cx="15" cy="16" r="2.2"/></svg>',
   lock: SVG_OPEN + '<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>',
   sun: SVG_OPEN + '<circle cx="12" cy="12" r="4"/><path d="M12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22M4.9 4.9l1.8 1.8M17.3 17.3l1.8 1.8M19.1 4.9l-1.8 1.8M6.7 17.3l-1.8 1.8"/></svg>',
@@ -166,6 +183,9 @@ function md(src) {
   s = linkifyRaw(s)
   s = s.replace(/`([^`\n]+)`/g, '<code>$1</code>')
   s = s.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
+  s = s.replace(/(^|[^*\w])\*([^*\n]+)\*(?![\w*])/g, '$1<em>$2</em>')   // 斜体（粗体已先行转换）
+  s = s.replace(/~~([^~\n]+)~~/g, '<del>$1</del>')                        // 删除线
+  s = s.replace(/!\[([^\]]*)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">[图]$1</a>')  // 图片语法 → 链接（不残留感叹号）
   s = s.replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
   const lines = s.split('\n')
   let html = '', list = null, para = [], table = []
@@ -173,8 +193,21 @@ function md(src) {
   const flushPara = () => { if (para.length) { html += '<p>' + para.join('<br>') + '</p>'; para = [] } }
   const flushList = () => { if (list) { html += '<' + list + '>' + listItems + '</' + list + '>'; list = null; listItems = '' } }
   const flushTable = () => {
-    if (table.length >= 2) html += '<span class="md-table">' + table.join('\n') + '</span>'
-    else if (table.length) para.push(...table)
+    if (table.length >= 2) {
+      // | a | b | 行 → 单元格；|---|---| 判定为表头分隔（真表格替代等宽竖线文本，390px 上列才能对齐）
+      const rows = table.map((line) => line.trim().replace(/^\||\|$/g, '').split('|').map((c) => c.trim()))
+      const sepIdx = rows.findIndex((r) => r.length && r.every((c) => /^:?-{2,}:?$/.test(c)))
+      const isNum = (c) => /^[±+\-]?[\d,.]+[%xkKMB亿万]?$/.test(c.replace(/<[^>]+>/g, '').trim())
+      const emit = (r, tag) => {
+        html += '<tr>' + r.map((c) => '<' + tag + (tag === 'td' && isNum(c) ? ' class="num"' : '') + '>' + c + '</' + tag + '>').join('') + '</tr>'
+      }
+      html += '<div class="tbl-wrap"><table>'
+      if (sepIdx > 0) {
+        emit(rows[0], 'th')
+        for (let i = 1; i < rows.length; i++) if (i !== sepIdx) emit(rows[i], 'td')
+      } else for (const r of rows) emit(r, 'td')
+      html += '</table></div>'
+    } else if (table.length) para.push(...table)
     table = []
   }
   for (const raw of lines) {
@@ -508,8 +541,21 @@ function toolNode(item) {
   if (item.name === 'bash' && item.args.command) detail += '$ ' + item.args.command + '\n'
   if (item.result) detail += (detail ? '\n' : '') + item.result
   if (!detail) { try { detail = JSON.stringify(item.args, null, 2) } catch (e) {} }
-  pre.textContent = detail.slice(0, 4000) || '(无输出)'
+  const TRUNC = 4000
+  const truncated = detail.length > TRUNC
+  pre.textContent = detail.slice(0, TRUNC) || '(无输出)'
   body.appendChild(pre)
+  if (truncated) body.appendChild(el('div', 'tool-trunc', '⚠ 输出超过 ' + TRUNC + ' 字符，已截断显示——点「复制」可取完整内容'))
+  // 工具卡操作行：复制完整输出（构建日志/检索结果直接可取，不必手动框选）
+  if (detail) {
+    const acts = el('div', 'tool-acts')
+    const cp = el('button', 'tool-copy2')
+    cp.type = 'button'
+    cp.textContent = '复制'
+    cp.onclick = (e) => { e.stopPropagation(); copyText(detail, (ok) => toast(ok ? '已复制完整输出（' + detail.length + ' 字符）' : '复制失败，请重试', !ok)) }
+    acts.appendChild(cp)
+    body.appendChild(acts)
+  }
   const toggle = () => { card.classList.toggle('open'); head.setAttribute('aria-expanded', card.classList.contains('open') ? 'true' : 'false') }
   head.onclick = toggle
   head.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle() } }
@@ -550,7 +596,8 @@ function approvalNode(s, a) {
   if (a.reason) card.appendChild(el('div', 'approval-reason', a.reason))
   if (a.outcome) {
     const done = el('div', 'approval-done ' + (a.outcome === 'allowed-once' ? 'ok' : a.outcome === 'rejected' ? 'no' : 'mut'))
-    done.textContent = a.outcome === 'allowed-once' ? '已允许 ✓' : a.outcome === 'rejected' ? '已拒绝 ✕' : '已' + a.outcome
+    const OUTCOME_ZH = { 'allowed-once': '已允许 ✓', 'rejected': '已拒绝 ✕', 'decided-elsewhere': '已在其它端处理', 'cancelled': '已取消' }
+    done.textContent = OUTCOME_ZH[a.outcome] || '已处理'
     card.appendChild(done)
     return card
   }
@@ -617,7 +664,7 @@ function questionNode(s, q) {
     if (question.detail) card.appendChild(el('div', 'ask-q-detail', question.detail))
     const multi = question.multiSelect === true
     ;(question.options || []).forEach((opt) => {
-      const row = el('div', 'ask-opt' + (multi ? ' multi' : ''))
+      const row = btnize(el('div', 'ask-opt' + (multi ? ' multi' : '')))
       const radio = el('span', 'radio')
       const txt = el('span')
       txt.appendChild(el('div', 'o-label', opt.label))
@@ -714,14 +761,15 @@ function openImageViewer(src) {
   if (!ov) {
     ov = el('div', 'img-viewer')
     ov.id = 'img-viewer'
-    ov.onclick = () => ov.classList.remove('open')
+    ov.setAttribute('aria-hidden', 'true')
+    ov.onclick = () => ovSet('img-viewer', false)
     document.body.appendChild(ov)
   }
   ov.textContent = ''
   const im = el('img')
   im.src = src; im.alt = '查看图片'
   ov.appendChild(im)
-  ov.classList.add('open')
+  ovSet('img-viewer', true)
 }
 
 function skeletonNode() {
@@ -785,7 +833,7 @@ function itemNode(s, item) {
       if (item.pending) meta.appendChild(el('span', 'meta-pending', '发送中…'))
       if (item.text) {
         const cp = metaIcon('copy', '复制这条消息')
-        cp.onclick = () => { vibrate(8); copyText(item.text, () => {}) ; toast('已复制 ✓') }
+        cp.onclick = () => { vibrate(8); copyText(item.text, (ok) => toast(ok ? '已复制 ✓' : '复制失败，请重试', !ok)) }
         meta.appendChild(cp)
       }
       if (item.failed) {
@@ -806,7 +854,7 @@ function itemNode(s, item) {
       if (item.time) meta.appendChild(el('span', 'meta-time', fmtTime(item.time)))
       if (item.text) {
         const cp = metaIcon('copy', '复制这条消息')
-        cp.onclick = () => { vibrate(8); copyText(item.text, () => {}); toast('已复制 ✓') }
+        cp.onclick = () => { vibrate(8); copyText(item.text, (ok) => toast(ok ? '已复制 ✓' : '复制失败，请重试', !ok)) }
         meta.appendChild(cp)
       }
       if (item.reasoning && item.reasoning.trim()) meta.appendChild(thinkDot(() => openThink({ text: item.reasoning, live: false })))
@@ -892,7 +940,7 @@ function openThink(opts) {
   thinkDrawer.live = !!opts.live
   body.textContent = opts.live ? liveReasoningText(opts.session) : (opts.text || '')
   liveBadge.classList.toggle('on', !!opts.live)
-  ov.classList.add('open'); dr.classList.add('open')
+  ovSet('think-overlay', true); dr.classList.add('open')
   body.scrollTop = body.scrollHeight
 }
 function liveReasoningText(s) {
@@ -900,8 +948,7 @@ function liveReasoningText(s) {
   return Object.keys(s.live.reasoning).sort((a, b) => a - b).map((k) => s.live.reasoning[k]).join('')
 }
 function closeThink() {
-  $('#think-overlay').classList.remove('open')
-  $('#think-drawer').classList.remove('open')
+  ovSet('think-overlay', false)
   thinkDrawer.session = null; thinkDrawer.live = false
 }
 /* 抽屉打开期间，思考流增量实时灌入 */
@@ -951,7 +998,7 @@ function renderList() {
     .filter((s) => !q || sessTitle(s).toLowerCase().includes(q) || (s.cwd || '').toLowerCase().includes(q))
     .sort((a, b) => b.updatedAt - a.updatedAt)
   // 同步分段控件的选中态
-  document.querySelectorAll('.seg-btn').forEach((b) => b.classList.toggle('sel', b.dataset.mode === S.listMode))
+  document.querySelectorAll('.seg-btn').forEach((b) => { const on = b.dataset.mode === S.listMode; b.classList.toggle('sel', on); b.setAttribute('aria-pressed', on ? 'true' : 'false') })
   setListTitle(null)  // 大标题默认「会话」；下钻工作区时再覆盖为工作区名
   if (S.todoMode) {
     visible = visible.filter(hasPending)
@@ -1097,26 +1144,28 @@ function sessionCard(s, showWs) {
   // ---- 左滑操作（iOS Mail 式）：滑出 重命名/分叉/停止/归档 ----
   const wrap = el('div', 'swipe-wrap')
   const actions = el('div', 'swipe-actions')
-  const mkAct = (glyph, label, color, fn) => {
+  const mkAct = (icoName, label, color, fn) => {
     const btn = el('button', 'swipe-act')
     btn.type = 'button'
     btn.style.background = color
-    btn.appendChild(el('span', 'sa-ico', glyph))
+    const gi = el('span', 'sa-ico')
+    gi.appendChild(icon(icoName, 16))
+    btn.appendChild(gi)
     btn.appendChild(el('span', 'sa-label', label))
     btn.onclick = () => { closeSwipe(); fn() }
     actions.appendChild(btn)
     return btn
   }
-  mkAct('✏️', '改名', 'var(--accent)', () => openSessionMenu(s.id, 0, 0, true))
-  mkAct('⑂', '分叉', '#8b5cf6', async () => {
+  mkAct('pencil', '改名', 'var(--accent)', () => openSessionMenu(s.id, 0, 0, true))
+  mkAct('fork', '分叉', 'var(--purple)', async () => {
     vibrate(8)
     try { toast('正在分叉…'); const v = await rpc('session/fork', { request: { sessionId: s.id } }); toast('已分叉 ✓'); location.hash = '#/s/' + v.sessionId } catch (e) { toast('分叉失败：' + e.message, true) }
   })
-  if (s.running) mkAct('⏹', '停止', 'var(--red)', async () => {
+  if (s.running) mkAct('stop', '停止', 'var(--red)', async () => {
     vibrate(8)
     try { await rpc('session/cancel', { request: { sessionId: s.id } }); s.running = false; renderList(); toast('已发送停止 ■') } catch (e) { toast(e.message, true) }
   })
-  mkAct('📦', '归档', '#6b7382', async () => {
+  mkAct('archive', '归档', 'var(--text-3)', async () => {
     vibrate(8)
     try { const av = await rpc('workspace/archiveSession', { request: { sessionId: s.id } }); if (av && Array.isArray(av.archivedSessionIds)) S.archived = new Set(av.archivedSessionIds); S.sessions.delete(s.id); renderList(); toast('已归档（桌面端可恢复）') } catch (e) { toast('归档失败：' + e.message, true) }
   })
@@ -1251,11 +1300,10 @@ function openSessionMenu(sid, x, y, expandRename) {
       toast('已发送停止 ■')
     } catch (e) { toast(e.message, true) }
   })
-  ov.classList.add('open'); sheet.classList.add('open')
+  ovSet('sess-ov', true); sheet.classList.add('open')
 }
 function closeSessionMenu() {
-  $('#sess-ov').classList.remove('open')
-  $('#sess-sheet').classList.remove('open')
+  ovSet('sess-ov', false); $('#sess-sheet').classList.remove('open')
 }
 function refreshBadges() {
   // 待办 chip：有待办才出现（替代被删除的底栏待办 tab）
@@ -1361,13 +1409,12 @@ function openTaskSheet(s) {
   if (!s || !s.todos || !s.todos.length) return
   taskSheetSession = s.id
   renderTaskSheet(s)
-  $('#task-ov').classList.add('open')
+  ovSet('task-ov', true)
   vibrate(8)
 }
 function closeTaskSheet() {
   taskSheetSession = null
-  const ov = $('#task-ov')
-  if (ov) ov.classList.remove('open')
+  ovSet('task-ov', false)
 }
 function renderTaskSheet(s) {
   const body = $('#task-body')
@@ -1475,8 +1522,31 @@ async function loadEarlier(s) {
 }
 
 /* ================= 实时流（WebSocket 下行） ================= */
+/* 手动重连：列表页连接胶囊与会话页断线条共用；后台另有 15s 轮询兜底 */
+function manualReconnect() {
+  if (S.connState === 'online') return
+  toast('正在重连…')
+  Mux.reconnect()
+  loadBase()
+}
+/* 会话页断线条：断线时显示在输入区上方，点按立即重连（原来只能等或退回列表） */
+function renderOfflineStrip() {
+  const strip = $('#offline-strip')
+  if (!strip) return
+  const off = S.connState !== 'online'
+  strip.style.display = off ? '' : 'none'
+  if (!off) return
+  strip.textContent = ''
+  strip.appendChild(el('span', 'st-ico', '⚠'))
+  strip.appendChild(el('span', 'st-tx', '连接已断开 · 后台每 15 秒自动重试'))
+  const btn = el('button', 'st-x', '立即重连')
+  btn.type = 'button'
+  btn.onclick = () => { vibrate(8); manualReconnect() }
+  strip.appendChild(btn)
+}
 function setConn(state) {
   S.connState = state
+  renderOfflineStrip()
   const pill = $('#conn-pill')
   if (pill) {
     pill.classList.toggle('off', state !== 'online')
@@ -1938,6 +2008,7 @@ function refreshChatChrome(s) {
   updateCtxBar(s)
   renderTaskBar(s)
   renderStaleStrip()
+  renderOfflineStrip()
   renderQueueStrip(s)
   // 输入框 placeholder 明示发送模式（运行中按设置排队/插话；长按发送反向）
   const input2 = $('#chat-input')
@@ -2069,10 +2140,10 @@ function openQSheet(s, q) {
       closeQSheet()
     } catch (e) { toast('删除失败：' + e.message, true) }
   }
-  ov.classList.add('open'); sheet.classList.add('open')
+  ovSet('q-ov', true); sheet.classList.add('open')
 }
 function closeQSheet() {
-  $('#q-ov').classList.remove('open')
+  ovSet('q-ov', false)
   $('#q-sheet').classList.remove('open')
 }
 /* 运行中发送模式：默认排队（与桌面一致），长按发送=本次反向 */
@@ -2171,10 +2242,15 @@ async function renderNew() {
   const wrap = $('#new-ws-list')
   wrap.textContent = ''
   if (!S.workspaces.length) await loadBase().catch(() => {})  // 工作区由 session/list 归并而来
-  if (!S.workspaces.length) { wrap.appendChild(el('div', 'empty-state', '没有工作区。先在桌面端创建一个。')); return }
+  if (!S.workspaces.length) {
+    wrap.appendChild(el('div', 'empty-state', '还没有工作区\n先在桌面端打开 DSH 并添加一个文件夹，或等列表同步完成'))
+    const btn = $('#start-btn')
+    if (btn) { btn.disabled = true; btn.textContent = '暂无可用工作区' }
+    return
+  }
   if (!newSel || !S.workspaces.find((w) => w.workspaceId === newSel)) newSel = S.workspaces[0].workspaceId
   for (const w of S.workspaces) {
-    const row = el('div', 'pick-ws' + (w.workspaceId === newSel ? ' sel' : ''))
+    const row = btnize(el('div', 'pick-ws' + (w.workspaceId === newSel ? ' sel' : '')))
     const wi = el('div', 'ws-ico'); wi.appendChild(icon('folder', 17))
     row.appendChild(wi)
     const mid = el('div'); mid.style.minWidth = '0'
@@ -2195,16 +2271,17 @@ async function renderNew() {
         S.presets = (v.presets || []).map((p) => ({ id: p.id, name: p.name || p.id, isDefault: !!p.isDefault }))
         if (location.hash === '#/new') renderNew()
       })
-      .catch(() => { S.presets = []; if (location.hash === '#/new') renderNew() })
+      .catch(() => { S.presets = { error: true }; if (location.hash === '#/new') renderNew() })
     return
   }
+  if (S.presets && S.presets.error) { prow.appendChild(el('span', 'sheet-note', '预设加载失败，将使用默认预设')); return }
   if (!S.presets.length) { prow.appendChild(el('span', 'sheet-note', '使用默认预设')); return }
   if (!newPreset || !S.presets.find((p) => p.id === newPreset)) {
     const def = S.presets.find((p) => p.isDefault) || S.presets[0]
     newPreset = def.id
   }
   for (const p of S.presets) {
-    const chip = el('span', 'chip' + (p.id === newPreset ? ' sel' : ''), p.name)
+    const chip = btnize(el('span', 'chip' + (p.id === newPreset ? ' sel' : ''), p.name))
     chip.onclick = () => { newPreset = p.id; vibrate(8); prow.querySelectorAll('.chip').forEach((x) => x.classList.remove('sel')); chip.classList.add('sel') }
     prow.appendChild(chip)
   }
@@ -2325,10 +2402,17 @@ function openSheet(s) {
   sheetSession = s.id
   closeSubPanel()
   renderSheet(s)
-  $('#sheet-overlay').classList.add('open')
+  ovSet('sheet-overlay', true)
   if (!s.models) loadModels(s)
 }
-function closeSheet() { sheetSession = null; closeSubPanel(); $('#sheet-overlay').classList.remove('open') }
+function ovSet(id, open) {
+  const ov = document.getElementById(id)
+  if (!ov) return
+  ov.classList.toggle('open', open)
+  ov.setAttribute('aria-hidden', open ? 'false' : 'true')
+  if (typeof ovPush === 'function') { open ? ovPush(id) : ovPop(id) }
+}
+function closeSheet() { sheetSession = null; closeSubPanel(); ovSet('sheet-overlay', false) }
 
 /* ---- ⋯ 菜单二级推送面板（方案 A）：菜单永远一屏，选值类操作最多深一级 ---- */
 let subPanelKind = null   // 'model' | 'perm' | 'send' | 'stats' | null
@@ -2415,7 +2499,7 @@ function renderSheet(s) {
   c.appendChild(el('div', 'sheet-title', sessTitle(s)))
   // 通用设置行：名称 + 描述 + 当前值 + ›
   const valueRow = (name, desc, value, onClick) => {
-    const r = el('div', 'sheet-row')
+    const r = btnize(el('div', 'sheet-row'))
     const mid = el('div'); mid.style.minWidth = '0'; mid.style.flex = '1'
     mid.appendChild(el('div', 'r-name', name))
     if (desc) mid.appendChild(el('div', 'r-desc', desc))
@@ -2446,15 +2530,17 @@ function renderSheet(s) {
   const statVal = p && p.contextWindow ? Math.round(p.pressureTokens / p.contextWindow * 100) + '% · ' + fmtCtxTok(p.pressureTokens) : '—'
   c.appendChild(valueRow('统计', '上下文 / tokens / 耗时', statVal, () => openStatsPanel(s)))
   // ---- 复制全部对话（直接动作）----
-  const copyRow = el('div', 'sheet-row')
+  const copyRow = btnize(el('div', 'sheet-row'))
   const cm = el('div'); cm.style.minWidth = '0'; cm.style.flex = '1'
   cm.appendChild(el('div', 'r-name', '复制全部对话'))
   cm.appendChild(el('div', 'r-desc', '导出为纯文本，粘贴到任何地方'))
   copyRow.appendChild(cm)
   copyRow.onclick = () => {
-    copyText(sessionText(s), () => {})
-    vibrate(10)
-    toast('已复制 ' + s.items.filter((i) => i.kind === 'user' || i.kind === 'assistant').length + ' 条消息')
+    copyText(sessionText(s), (ok) => {
+      vibrate(10)
+      if (ok) toast('已复制 ' + s.items.filter((i) => i.kind === 'user' || i.kind === 'assistant').length + ' 条消息')
+      else toast('复制失败，请重试', true)
+    })
   }
   c.appendChild(copyRow)
   c.appendChild(el('div', 'sheet-note', '菜单就这一屏。点带 › 的行进入对应设置。'))
@@ -2489,7 +2575,7 @@ function renderModelPanel(s) {
     body.appendChild(el('div', 'sheet-group', '思考强度 · ' + curMod.name))
     const chips = el('div', 'chip-row')
     for (const ef of curMod.reasoning.efforts) {
-      const chip = el('span', 'chip' + (ef.id === cur.reasoningEffort ? ' sel' : ''), ef.name)
+      const chip = btnize(el('span', 'chip' + (ef.id === cur.reasoningEffort ? ' sel' : ''), ef.name))
       chip.title = ef.description || ''
       chip.onclick = () => { vibrate(8); if (ef.id !== cur.reasoningEffort && g) applyModel(s, g, curMod, ef.id) }
       chips.appendChild(chip)
@@ -2527,7 +2613,7 @@ function renderSendPanel(s) {
   body.textContent = ''
   const modeRow = el('div', 'mode-row')
   for (const m of ['queue', 'steer']) {
-    const chip = el('span', 'chip' + (busyEnter() === m ? ' sel' : ''), m === 'queue' ? '排队（默认）' : '插话')
+    const chip = btnize(el('span', 'chip' + (busyEnter() === m ? ' sel' : ''), m === 'queue' ? '排队（默认）' : '插话'))
     chip.onclick = () => { vibrate(8); setBusyEnter(m); refreshSheetViews(s) }
     modeRow.appendChild(chip)
   }
@@ -2572,7 +2658,7 @@ function renderStatsSection(s, c, noHeader) {
   const brk = s.ctxBreakdown
   if (brk && brk.messageTokens != null) {
     const track = el('div', 'brkd')
-    for (const [v2, col] of [[brk.messageTokens, 'var(--accent)'], [brk.toolsTokens || 0, '#8b5cf6'], [brk.systemTokens || 0, 'var(--text-3)']]) {
+    for (const [v2, col] of [[brk.messageTokens, 'var(--accent)'], [brk.toolsTokens || 0, 'var(--purple)'], [brk.systemTokens || 0, 'var(--text-3)']]) {
       const i2 = el('i'); i2.style.flex = String(Math.max(1, v2)); i2.style.background = col; track.appendChild(i2)
     }
     num.appendChild(track)
@@ -2628,7 +2714,7 @@ function sessionText(s) {
 /* 模型行（紧凑单行）：15 个模型全铺开也不至于失控；描述不展示，强度在面板顶部统一处理 */
 function modelRow(s, g, mod, current) {
   const isCur = !!(current && current.provider === g.id && current.model === mod.id)
-  const row = el('div', 'sheet-row model-row' + (isCur ? ' sel' : ''))
+  const row = btnize(el('div', 'sheet-row model-row' + (isCur ? ' sel' : '')))
   const mid = el('div'); mid.style.minWidth = '0'; mid.style.flex = '1'
   mid.appendChild(el('div', 'r-name', mod.name))
   row.appendChild(mid)
@@ -2649,7 +2735,7 @@ const permLabel = (v) => (PERM_LABEL[v] ? PERM_LABEL[v][0] : v)
 const permDesc = (opt) => (PERM_LABEL[opt.value] ? PERM_LABEL[opt.value][1] : (opt.description || ''))
 function permRow(s, opt, currentValue) {
   const isCur = opt.value === currentValue
-  const row = el('div', 'sheet-row' + (isCur ? ' sel' : ''))
+  const row = btnize(el('div', 'sheet-row' + (isCur ? ' sel' : '')))
   const mid = el('div'); mid.style.minWidth = '0'; mid.style.flex = '1'
   mid.appendChild(el('div', 'r-name', permLabel(opt.value)))
   const dsc = permDesc(opt)
@@ -2727,48 +2813,6 @@ function toggleTheme() {
   applyTheme(next)
 }
 
-/* ================= 长按复制气泡 ================= */
-let copyPill = null
-function dismissCopyPill() { if (copyPill) { copyPill.remove(); copyPill = null } }
-function showCopyPill(x, y, text) {
-  dismissCopyPill()
-  const pill = el('button', 'copy-pill')
-  pill.type = 'button'
-  pill.appendChild(icon('copy', 15))
-  pill.appendChild(el('span', null, '复制'))
-  document.body.appendChild(pill)
-  const w = pill.offsetWidth
-  pill.style.left = Math.max(10, Math.min(x - w / 2, window.innerWidth - w - 10)) + 'px'
-  pill.style.top = Math.max(10, y - 54) + 'px'
-  pill.onclick = () => {
-    copyText(text, () => {})
-    dismissCopyPill()
-    toast('已复制 ✓')
-  }
-  copyPill = pill
-  vibrate(10)
-}
-function initLongPressCopy(sc) {
-  if (!sc) return
-  let timer = null, tx = 0, ty = 0, target = null
-  sc.addEventListener('touchstart', (e) => {
-    const b = e.target.closest && e.target.closest('.msg .bubble')
-    dismissCopyPill()
-    if (!b) return
-    target = b; tx = e.touches[0].clientX; ty = e.touches[0].clientY
-    clearTimeout(timer)
-    timer = setTimeout(() => {
-      const text = target._copyText || target.textContent
-      if (text && text.trim()) showCopyPill(tx, ty, text)
-    }, 460)
-  }, { passive: true })
-  const cancel = () => clearTimeout(timer)
-  sc.addEventListener('touchend', cancel)
-  sc.addEventListener('touchmove', cancel)
-  sc.addEventListener('touchcancel', cancel)
-  document.addEventListener('touchstart', (e) => { if (copyPill && !(e.target.closest && e.target.closest('.copy-pill'))) dismissCopyPill() }, { passive: true })
-}
-
 /* ================= 骨架 ================= */
 function buildShell() {
   $('#app').innerHTML = `
@@ -2784,9 +2828,9 @@ function buildShell() {
         <input class="search" id="search" placeholder="搜索会话" autocapitalize="off" autocorrect="off" spellcheck="false" aria-label="搜索会话">
         <button class="todo-chip" id="todo-chip" type="button" aria-label="只看待处理" style="display:none"></button>
       </div>
-      <div class="list-seg" id="list-seg" role="tablist" aria-label="列表排序方式">
-        <button class="seg-btn" data-mode="time" type="button" role="tab">最近活跃</button>
-        <button class="seg-btn" data-mode="workspace" type="button" role="tab">按工作区</button>
+      <div class="list-seg" id="list-seg" aria-label="列表排序方式">
+        <button class="seg-btn" data-mode="time" type="button" aria-pressed="true">最近活跃</button>
+        <button class="seg-btn" data-mode="workspace" type="button" aria-pressed="false">按工作区</button>
       </div>
       <div id="session-list"></div>
     </div>
@@ -2809,6 +2853,7 @@ function buildShell() {
     <div class="chat-scroll" id="chat-scroll"></div>
     <div class="composer-wrap">
       <div class="stale-strip" id="stale-strip" style="display:none"></div>
+      <div class="stale-strip off" id="offline-strip" style="display:none"></div>
       <div class="q-strip" id="q-strip"></div>
       <div class="attach-strip" id="attach-strip"></div>
       <div class="composer">
@@ -2873,9 +2918,9 @@ function buildShell() {
   <div class="sheet-overlay" id="q-ov" aria-hidden="true">
     <div class="sheet q-sheet" id="q-sheet" role="dialog" aria-label="排队消息管理">
       <div class="grabber"></div>
-      <div class="act-row" id="q-a-edit"><span class="ic">✏️</span>编辑内容<span class="sub">修改这段排队的文本</span></div>
-      <div class="act-row" id="q-a-steer"><span class="ic">⚡</span>立即插话<span class="sub">不等本轮结束，马上生效</span></div>
-      <div class="act-row danger" id="q-a-del"><span class="ic">🗑</span>删除<span class="sub">取消这条排队</span></div>
+      <div class="act-row" id="q-a-edit" role="button" tabindex="0"><span class="ic" data-act-ic="pencil"></span>编辑内容<span class="sub">修改这段排队的文本</span></div>
+      <div class="act-row" id="q-a-steer" role="button" tabindex="0"><span class="ic" data-act-ic="bolt"></span>立即插话<span class="sub">不等本轮结束，马上生效</span></div>
+      <div class="act-row danger" id="q-a-del" role="button" tabindex="0"><span class="ic" data-act-ic="trash"></span>删除<span class="sub">取消这条排队</span></div>
       <div class="q-edit-box" id="q-edit-box" contenteditable aria-label="编辑排队内容"></div>
       <button class="q-save" id="q-save" type="button">保存修改</button>
     </div>
@@ -2884,8 +2929,8 @@ function buildShell() {
     <div class="sheet q-sheet" id="sess-sheet" role="dialog" aria-label="会话操作">
       <div class="grabber"></div>
       <div class="sess-menu-title" id="sess-menu-title"></div>
-      <div class="act-row" id="sess-a-rename"><span class="ic">✏️</span>重命名<span class="sub">改这个会话的标题</span></div>
-      <div class="act-row" id="sess-a-fork"><span class="ic">⑂</span>分叉<span class="sub">复制到新会话继续</span></div>
+      <div class="act-row" id="sess-a-rename" role="button" tabindex="0"><span class="ic" data-act-ic="pencil"></span>重命名<span class="sub">改这个会话的标题</span></div>
+      <div class="act-row" id="sess-a-fork" role="button" tabindex="0"><span class="ic" data-act-ic="fork"></span>分叉<span class="sub">复制到新会话继续</span></div>
       <div class="act-row" id="sess-a-stop"><span class="ic">⏹</span>停止<span class="sub">中断正在运行的任务</span></div>
       <div class="act-row" id="sess-a-archive"><span class="ic">📦</span>归档<span class="sub">从列表收起（桌面端可恢复）</span></div>
       <div class="q-edit-box" id="sess-rename-box" contenteditable aria-label="新标题"></div>
@@ -2895,9 +2940,10 @@ function buildShell() {
   <div class="toast" id="toast" role="status" aria-live="polite"></div>`
   // 注入 SVG 图标
   document.querySelectorAll('[data-ic]').forEach((slot) => {
-    const size = slot.closest('.tab') ? 22 : slot.closest('.nav-btn') ? 24 : slot.closest('.stop') ? 12 : 18
+    const size = slot.closest('.nav-btn') ? 24 : slot.closest('.stop') ? 12 : 18
     slot.appendChild(icon(slot.dataset.ic, size))
   })
+  document.querySelectorAll('[data-act-ic]').forEach((slot) => { slot.appendChild(icon(slot.dataset.actIc, 16)) })
   const gh = (id, ic, text) => { const g = $(id); g.appendChild(icon(ic, 14)); g.appendChild(el('span', null, text)) }
   gh('#ws-group-h', 'folder', '选择工作区')
   gh('#preset-group-h', 'robot', 'Agent 预设')
@@ -2952,7 +2998,9 @@ function buildShell() {
   // 任务清单抽屉：顶部常驻条点击打开；背景/✕ 关闭；同样支持下拽关闭
   $('#task-ov').addEventListener('click', (e) => { if (e.target.id === 'task-ov') closeTaskSheet() })
   $('#task-close').onclick = closeTaskSheet
-  $('#task-bar').onclick = () => { const s = S.sessions.get(S.current); if (s && s.todos && s.todos.length) openTaskSheet(s) }
+  const taskBarTap = () => { const s = S.sessions.get(S.current); if (s && s.todos && s.todos.length) openTaskSheet(s) }
+  $('#task-bar').onclick = taskBarTap
+  $('#task-bar').onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); taskBarTap() } }
   ;(function () {
     const sheet = $('#task-ov .sheet'), body = $('#task-body')
     let dragging = false, sy = 0, dy = 0
@@ -2985,12 +3033,6 @@ function buildShell() {
   $('#theme-toggle').onclick = () => { toggleTheme(); vibrate(8) }
   // 连接状态：断线时可点按手动重连（不必等 15s 轮询）
   const connPill = $('#conn-pill')
-  const manualReconnect = () => {
-    if (S.connState === 'online') return
-    toast('正在重连…')
-    Mux.reconnect()
-    loadBase()
-  }
   connPill.onclick = manualReconnect
   connPill.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); manualReconnect() } }
   // 「↓」pill：不在底部时始终显示（回到底部）；有新消息时升级为「↓ 新消息」
@@ -3026,7 +3068,7 @@ function buildShell() {
     if (cp) {
       const pre = cp.parentElement && cp.parentElement.querySelector('pre')
       const t = pre ? pre.textContent : ''
-      copyText(t, () => { cp.textContent = '已复制 ✓'; setTimeout(() => { cp.textContent = '复制' }, 1200) })
+      copyText(t, (ok) => { cp.textContent = ok ? '已复制 ✓' : '复制失败'; setTimeout(() => { cp.textContent = '复制' }, 1200) })
       return
     }
     const im = e.target.closest && e.target.closest('.msg-img')
@@ -3176,7 +3218,28 @@ document.addEventListener('visibilitychange', () => {
 route()
 loadBase()
 Mux.connect()
+/* 键盘可达：role=button 的元素统一 Enter/Space 触发 click（自带 onkeydown 的跳过，避免双发） */
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter' && e.key !== ' ') return
+  const t = e.target
+  if (!t || !t.getAttribute || t.getAttribute('role') !== 'button') return
+  if (t.tagName === 'BUTTON' || t.onkeydown) return
+  e.preventDefault()
+  t.click()
+})
 setInterval(() => { if (S.connState !== 'online') loadBase() }, 15000)
+/* Esc 关闭最上层浮层（多个开着时关最后打开的那个） */
+const OV_CLOSERS = { 'sheet-overlay': closeSheet, 'think-overlay': closeThink, 'task-ov': closeTaskSheet, 'q-ov': closeQSheet, 'sess-ov': closeSessionMenu, 'img-viewer': () => ovSet('img-viewer', false) }
+const ovStack = []
+const ovPush = (id) => { const i = ovStack.indexOf(id); if (i >= 0) ovStack.splice(i, 1); ovStack.push(id) }
+const ovPop = (id) => { const i = ovStack.indexOf(id); if (i >= 0) ovStack.splice(i, 1) }
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return
+  const top = ovStack[ovStack.length - 1]
+  if (!top) return
+  const fn = OV_CLOSERS[top]
+  if (fn) { e.preventDefault(); fn() }
+})
 /* 调试/端到端验证钩子：真实验证需要触达闭包内部（如主动断开 WS 走真实重连路径）。
    页面脚本本就同源同权，不构成新的暴露面。 */
 try { window.__dsh = { S, Mux, sess } } catch (e) {}
