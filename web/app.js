@@ -242,7 +242,10 @@ async function rpc(endpoint, args, rpcId, timeoutMs) {
     // Tailscale 抖动时挂起的请求会让气泡永远停在「发送中」：20s 超时落地成失败态（可点重试）
     signal: AbortSignal.timeout(timeoutMs || 20000),
   })
-  if (!r.ok) throw new Error(endpoint + ': HTTP ' + r.status + (r.status === 401 ? '（登录已过期：请重新打开带 token 的登录链接）' : r.status === 403 ? '（主机不在信任名单）' : ''))
+  if (!r.ok) {
+    if (r.status === 401) markAuthExpired()
+    throw new Error(endpoint + ': HTTP ' + r.status + (r.status === 401 ? '（登录已过期）' : r.status === 403 ? '（主机不在信任名单）' : ''))
+  }
   const full = await r.json()
   if (!full.result || !full.result.ok) {
     const err = full.result && full.result.error
@@ -271,6 +274,7 @@ const S = {
   wsDrill: null,            // 「按工作区」视图下钻的工作区 id（null = 显示工作区列表）；'__other__' = 未分组
   listLoaded: false,        // 首次 session/list 是否已落地（空态分岔用）
   staleNotice: null,        // 断线期间失效的审批/提问计数（重连后挂条提示，可手动关掉）
+  authExpired: false,       // rpc 401 → 顶部常驻横幅（PWA cookie 隔离时给出明确出路）
   es: { mux: null },
   wfClient: null,           // $events ready 帧下发的 clientId（waterfall 应答要用）
 }
@@ -734,7 +738,15 @@ function rerenderQuestion(s, q) {
 /* ================= 渲染：对话 ================= */
 function chatScrollEl() { return $('#chat-scroll') }
 function nearBottom(sc) { return sc.scrollHeight - sc.scrollTop - sc.clientHeight < 120 }
-function scrollBottom(sc, force) { if (force || nearBottom(sc)) sc.scrollTop = sc.scrollHeight }
+/* 钉在底部。iOS WebKit 在惯性滚动/键盘聚焦期间会丢弃单次 scrollTop 赋值——
+ * 下一帧再确认一次；用户一旦主动上滑（gap 超 Threshold）立即放弃，不抢滚动权 */
+function scrollBottom(sc, force) {
+  if (!(force || nearBottom(sc))) return
+  sc.scrollTop = sc.scrollHeight
+  requestAnimationFrame(() => {
+    if (Math.abs(sc.scrollHeight - sc.scrollTop - sc.clientHeight) < 160) sc.scrollTop = sc.scrollHeight
+  })
+}
 
 /* 「↓」pill 状态机：不在底部→显示「↓」；有新内容→「↓ 新消息」；回到底部→隐藏 */
 function updateJumpPill() {
@@ -1522,6 +1534,30 @@ async function loadEarlier(s) {
 }
 
 /* ================= 实时流（WebSocket 下行） ================= */
+/* 登录过期（401）：独立 PWA 的 cookie 与 Safari 可能不共享/已过期，
+   表现成"界面看着活着（WS 是旧连接）但发消息永远发不出去"。给出明确出路而不是让它看起来像网络问题。 */
+function markAuthExpired() {
+  if (S.authExpired) return
+  S.authExpired = true
+  renderAuthBanner()
+}
+function renderAuthBanner() {
+  let el2 = document.getElementById('auth-banner')
+  if (!S.authExpired) { if (el2) el2.remove(); return }
+  if (!el2) {
+    el2 = document.createElement('div')
+    el2.id = 'auth-banner'
+    el2.setAttribute('role', 'alert')
+    document.body.appendChild(el2)
+  }
+  el2.textContent = ''
+  el2.appendChild(document.createTextNode('登录已过期：请在 Safari 重新打开带 token 的访问链接，然后回到本页刷新。'))
+  const btn = document.createElement('button')
+  btn.type = 'button'
+  btn.textContent = '刷新'
+  btn.onclick = () => location.reload()
+  el2.appendChild(btn)
+}
 /* 手动重连：列表页连接胶囊与会话页断线条共用；后台另有 15s 轮询兜底 */
 function manualReconnect() {
   if (S.connState === 'online') return

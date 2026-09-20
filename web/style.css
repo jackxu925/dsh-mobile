@@ -736,6 +736,9 @@ html.light .run-dot { background:var(--info); }
 .stale-strip .st-tx { flex:1; min-width:0; line-height:1.5; }
 .stale-strip .st-x { flex:none; border:none; background:rgba(255,159,10,.2); color:var(--orange); font-family:var(--font); font-size:12px; font-weight:700; border-radius:9px; padding:7px 12px; min-height:36px; cursor:pointer; }
 html.light .stale-strip { background:rgba(154,74,6,.07); border-color:rgba(154,74,6,.3); }
+/* 登录过期横幅：置顶常驻（role=alert），键盘弹起也看得见 */
+#auth-banner { position:fixed; top:0; left:0; right:0; z-index:99; display:flex; align-items:center; gap:10px; padding:10px 14px calc(10px); background:rgba(193,18,31,.94); color:#fff; font-size:13px; line-height:1.5; padding-top:calc(10px + env(safe-area-inset-top, 0px)); }
+#auth-banner button { flex:none; border:none; border-radius:9px; padding:8px 16px; min-height:36px; background:rgba(255,255,255,.16); color:#fff; font-family:var(--font); font-size:13px; font-weight:700; cursor:pointer; }
 /* 会话页断线条：中性色（与"失效交代"的橙色区分） */
 .stale-strip.off { background:rgba(255,255,255,.06); border-color:var(--line); color:var(--text-2); }
 .stale-strip.off .st-x { background:rgba(59,130,246,.16); color:var(--info); }
