@@ -386,8 +386,10 @@ button, .session-card, .tool-head, .sheet-row, .tab, .pick-ws, .ask-opt, .chip, 
   flex:none;
   background:rgba(18,22,31,.94); backdrop-filter:blur(20px); -webkit-backdrop-filter:blur(20px);
   border-top:.5px solid var(--line);
-  padding:6px 12px calc(4px + env(safe-area-inset-bottom, 0px) / 2);
+  /* 底栏背景延伸填满 home 指示条区域（独立 PWA 模式下消除「死色带」），输入框本体仍在指示条上方 */
+  padding:6px 12px calc(4px + env(safe-area-inset-bottom, 0px));
 }
+/* 键盘弹起：指示条区被键盘覆盖，输入框直接贴键盘上沿 */
 .composer-wrap:focus-within { padding-bottom: 4px; }
 .running-bar { display:none; align-items:center; gap:8px; padding:0 4px 8px; font-size:12.5px; color:#6aa6ff; }
 .running-bar.show { display:flex; }
@@ -655,9 +657,8 @@ html.light .queue-chip { border-color: rgba(15,23,42,.22); }
 .meta-ico.think.live .td:nth-child(2) { animation-delay:.15s }
 .meta-ico.think.live .td:nth-child(3) { animation-delay:.3s }
 @keyframes meta-wave { 0%,100% { transform:translateY(0); opacity:.5 } 50% { transform:translateY(-2.2px); opacity:1 } }
-/* 底部压平：输入框直贴屏幕底缘（键盘弹起时同样 4px） */
-.composer-wrap { padding:6px 12px 4px; }
-.composer-wrap:focus-within { padding-bottom:4px; }
+/* 键盘弹起时输入框贴键盘上沿（指示条区被键盘覆盖，无需预留） */
+.composer-wrap:focus-within { padding-bottom:4px !important; }
 /* 浅色主题适配 */
 html.light .fab { box-shadow:0 10px 26px rgba(37,99,235,.35); }
 html.light .subtitle.running { color:#2563eb; }
@@ -722,3 +723,7 @@ html.light .run-dot { background:#2563eb; }
 .session-card, .session-card * { -webkit-user-select:none; user-select:none; -webkit-touch-callout:none; }
 /* 宽屏居中目标改为 wrapper */
 @media (min-width:700px) { .swipe-wrap { max-width:756px; margin-left:auto; margin-right:auto; } }
+
+/* 独立 PWA 的 home 指示条区适配：FAB 与提示 pill 抬到指示条上方（后写覆盖） */
+.fab { bottom: calc(18px + env(safe-area-inset-bottom, 0px)); }
+.new-msg-pill { bottom: calc(92px + env(safe-area-inset-bottom, 0px)); }
