@@ -316,12 +316,6 @@ button, .session-card, .tool-head, .sheet-row, .tab, .pick-ws, .ask-opt, .chip, 
 .tool-card.open .tool-body { display:block; }
 .tool-body pre { font-family:var(--mono); font-size:12px; line-height:1.55; color:var(--text-2); white-space:pre-wrap; word-break:break-word; }
 
-/* todo 卡 */
-.todo-card { align-self:stretch; max-width:min(97%, 780px); background:var(--bg-card); border:.5px solid var(--line); border-radius:14px; padding:10px 13px; font-size:13px; color:var(--text-2); }
-.todo-card .t-row { display:flex; gap:8px; align-items:flex-start; padding:3px 0; }
-.todo-card .t-ico { flex:none; width:16px; text-align:center; }
-.todo-card .t-done { color:var(--text-3); text-decoration:line-through; }
-
 /* 流式光标 */
 .caret { display:inline-block; width:9px; height:16px; background:var(--accent); border-radius:2px; vertical-align:-2px; animation:blink .8s step-end infinite; }
 @keyframes blink { 50% { opacity:0; } }
@@ -623,6 +617,48 @@ html.light .queue-chip { border-color: rgba(15,23,42,.22); }
 .think-close { margin-left:auto; width:30px; height:30px; border-radius:50%; border:none; background:var(--bg-card-2); color:var(--text-2); font-size:13px; }
 .think-close:active { transform:scale(.9); }
 .think-body { overflow-y:auto; -webkit-overflow-scrolling:touch; padding:0 16px 22px; font-size:12.5px; line-height:1.75; color:var(--text-2); font-family:var(--mono); white-space:pre-wrap; word-break:break-word; }
+
+/* ---- 任务清单：顶部悬置条（会话页，导航栏下方） ---- */
+.task-bar {
+  flex:none; position:relative; display:flex; align-items:center; gap:8px;
+  padding:7px 14px 8px; background:var(--bg-elev); border-bottom:.5px solid var(--line);
+  cursor:pointer; overflow:hidden;
+  transition:height .42s cubic-bezier(0.23,1,0.32,1), padding .42s cubic-bezier(0.23,1,0.32,1), background .3s;
+}
+.task-bar:active { background:var(--bg-card); }
+.task-bar .tb-ic { flex:none; width:15px; height:15px; display:flex; align-items:center; justify-content:center; color:#6aa6ff; transition:opacity .28s; }
+.task-bar .tb-cur { flex:1; min-width:0; font-size:12.5px; color:var(--text-2); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; transition:opacity .28s; }
+.task-bar .tb-cnt { flex:none; font-size:11.5px; color:var(--text-3); font-variant-numeric:tabular-nums; transition:opacity .28s; }
+.task-bar .tb-track { position:absolute; left:0; right:0; bottom:0; height:2px; background:rgba(255,255,255,.07); }
+.task-bar .tb-fill { display:block; height:100%; width:0; background:linear-gradient(90deg,var(--accent),#6aa6ff); transition:width .5s cubic-bezier(0.23,1,0.32,1); }
+.task-bar.alldone { background:rgba(52,199,89,.1); }
+.task-bar.alldone .tb-ic, .task-bar.alldone .tb-cur { color:var(--green); }
+.task-bar.alldone .tb-fill { background:var(--green); }
+/* 全部完成 3 秒后自我收场：只留一条绿线，点它还能看全量 */
+.task-bar.collapsed { height:3px; padding-top:0; padding-bottom:0; background:var(--bg); }
+.task-bar.collapsed .tb-ic, .task-bar.collapsed .tb-cur, .task-bar.collapsed .tb-cnt { opacity:0; }
+/* ---- 任务清单抽屉 ---- */
+.task-sheet { max-height:76%; }
+.task-head { display:flex; align-items:center; gap:8px; padding:2px 16px 10px; flex:none; }
+.task-title { font-size:13px; font-weight:700; color:var(--text-2); }
+.task-count { font-size:11px; font-weight:600; color:var(--text-3); font-variant-numeric:tabular-nums; }
+.task-body { overflow-y:auto; -webkit-overflow-scrolling:touch; padding:0 12px 20px; }
+.tk-row { display:flex; gap:9px; align-items:flex-start; padding:10px 12px; border-radius:12px; background:var(--bg-card); border:1px solid transparent; margin-bottom:6px; }
+.tk-row .tk-ico { flex:none; width:15px; text-align:center; font-size:12.5px; color:var(--text-3); line-height:1.45; }
+.tk-row .tk-txt { flex:1; min-width:0; font-size:13px; line-height:1.5; color:var(--text-2); word-break:break-word; }
+.tk-row .tk-tag { flex:none; font-size:10.5px; padding:2px 7px; border-radius:7px; background:rgba(59,130,246,.16); color:#6aa6ff; }
+.tk-row .tk-tag.ok { background:rgba(52,199,89,.14); color:var(--green); }
+.tk-row.now { border-color:rgba(59,130,246,.45); background:rgba(59,130,246,.08); }
+.tk-row.now .tk-txt { color:var(--text); }
+.tk-row.now .tk-ico { color:#6aa6ff; }
+.tk-row.done .tk-ico { color:var(--green); }
+.tk-row.done .tk-txt { color:var(--text-3); text-decoration:line-through; }
+.tk-pulse { display:inline-block; width:6px; height:6px; border-radius:50%; background:#6aa6ff; animation:tkd-pulse 1.2s infinite; }
+html.light .task-bar { background:#fff; }
+html.light .task-bar .tb-track { background:rgba(15,23,42,.08); }
+html.light .task-bar.collapsed { background:var(--bg); }
+html.light .task-bar.alldone { background:rgba(52,199,89,.1); }
+html.light .tk-row.now { background:rgba(59,130,246,.09); }
 
 /* 修复：flex 纵向容器里 overflow:hidden 的卡片会被压缩到 0（提问卡被挤成 2px → "什么都看不见"） */
 .chat-scroll > * { flex-shrink: 0; }

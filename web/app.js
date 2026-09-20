@@ -218,6 +218,11 @@ function sess(id) {
       ctxBreakdown: null,              // {systemTokens, toolsTokens, messageTokens}
       tokenUsage: null,                // {uncachedInputTokens, outputTokens, cacheReadTokens}
       sessionStats: null,              // {turns, steps, llmMs, toolMs}
+      todos: null,                     // 宿主 todos 投影（按 turn 重置）：[{content,status}] | null
+      _todoCalls: new Set(),           // 已从时间线隐去的 todo_write 工具调用 id
+      _pendingCalls: [],               // 待配对的 tool/call id 队列（结果消息不带 id，只能按顺序配）
+      _todoTimer: null,                // 全部完成后自动收起的定时器
+      _todoCollapsed: false,           // 任务条是否已收成一条细线
       _resolveLoad: null,              // loadHistory 的快照到达回调
     }
     S.sessions.set(id, s)
@@ -358,12 +363,24 @@ function foldEvent(s, event, view) {
       let args = {}
       try { args = JSON.parse(d.arguments || '{}') } catch (e) {}
       s.callArgs.set(d.callId, { name: d.name, args })
+      s._pendingCalls.push(d.callId)
+      // todo_write 不入时间线：它的内容已经挂在顶部的常驻任务条上，卡片只会是重复的 JSON
+      if (d.name === 'todo_write') { s._todoCalls.add(d.callId); break }
       s.items.push({ kind: 'tool', callId: d.callId, name: d.name, args, state: 'run', result: '', time: event.time })
       break
     }
     case 'tool/result': {
       const m = d.message || {}
-      const callId = m.toolCallId || m.callId || (m.tool_use && m.tool_use.id)
+      let callId = m.toolCallId || m.callId || (m.tool_use && m.tool_use.id) || null
+      // 宿主的 tool/result 消息不带 callId（只有 source/content/role/id），按调用顺序出队配对；
+      // 带 id 的就从待配对队列里摘掉，避免队列错位
+      if (callId) {
+        const qi = s._pendingCalls.indexOf(callId)
+        if (qi >= 0) s._pendingCalls.splice(qi, 1)
+      } else {
+        callId = s._pendingCalls.shift() || null
+      }
+      if (callId && s._todoCalls.has(callId)) { s._todoCalls.delete(callId); break }  // 同上：todo_write 的结果卡也跳过
       let item = callId ? s.items.find((x) => x.kind === 'tool' && x.callId === callId) : null
       if (!item) {  // 兜底：最近一个未完成工具卡
         for (let i = s.items.length - 1; i >= 0; i--) if (s.items[i].kind === 'tool' && s.items[i].state === 'run') { item = s.items[i]; break }
@@ -376,11 +393,6 @@ function foldEvent(s, event, view) {
       } else {
         s.items.push({ kind: 'tool', callId: callId || null, name: 'tool', args: {}, state: d.error ? 'err' : 'ok', result: text, time: event.time })
       }
-      break
-    }
-    case 'todo/write': {
-      for (let i = s.items.length - 1; i >= 0; i--) if (s.items[i].kind === 'todo') { s.items.splice(i, 1); break }
-      if (Array.isArray(d.todos) && d.todos.length) s.items.push({ kind: 'todo', todos: d.todos, time: event.time })
       break
     }
     case 'turn/start': s.running = true; break
@@ -743,21 +755,6 @@ function itemNode(s, item) {
       return m
     }
     case 'tool': return toolNode(item)
-    case 'todo': {
-      const c = el('div', 'todo-card')
-      item.todos.forEach((t) => {
-        const row = el('div', 't-row')
-        const ico = el('span', 't-ico')
-        if (t.status === 'completed') { ico.textContent = '✓'; ico.style.color = 'var(--green)' }
-        else if (t.status === 'in_progress') { ico.textContent = '▸'; ico.style.color = '#6aa6ff' }
-        else { ico.textContent = '○'; ico.style.color = 'var(--text-3)' }
-        row.appendChild(ico)
-        const txt = el('span', t.status === 'completed' ? 't-done' : '', t.content)
-        row.appendChild(txt)
-        c.appendChild(row)
-      })
-      return c
-    }
     case 'sys': {
       const d = el('div', null, item.text)
       d.style.cssText = 'align-self:center;font-size:12.5px;color:var(--text-3);padding:4px 0'
@@ -1183,7 +1180,99 @@ function applyListValues(s, values) {
   if (values.permissions && Array.isArray(values.permissions.options)) s.permissions = values.permissions
   if (values.imageLimits) s.imageLimits = values.imageLimits
   if (values.modelSelection && values.modelSelection.next) s.modelSel = values.modelSelection.next
+  if ('todos' in values) setTodos(s, values.todos)
   applyStats(s, values)
+}
+
+/* ================= 任务清单（todos 投影 → 顶部悬置条） =================
+   宿主 dsh-tool-todo 把 todo/write 的全量快照存成 todos 投影，并在 turn/start 时清空，
+   所以「这一轮的步骤清单」直接读投影即可：不用自己合并增量，也不会被翻旧历史覆盖。
+   显示位置只有一个：会话页导航栏下方的常驻条（对话时间线里不再插卡片）。 */
+function setTodos(s, list) {
+  const next = Array.isArray(list) && list.length ? list.map((t) => ({ content: String(t.content || ''), status: t.status })) : null
+  const same = JSON.stringify(next) === JSON.stringify(s.todos)
+  if (same) return
+  s.todos = next
+  s._todoCollapsed = false
+  clearTimeout(s._todoTimer); s._todoTimer = null
+  if (S.current === s.id) renderTaskBar(s)
+  if (taskSheetSession === s.id) { if (next) renderTaskSheet(s); else closeTaskSheet() }
+}
+function todoStats(s) {
+  const list = s.todos || []
+  const done = list.filter((t) => t.status === 'completed').length
+  const cur = list.find((t) => t.status === 'in_progress') || (done < list.length ? list[done] : null)
+  return { list, total: list.length, done, cur, allDone: list.length > 0 && done === list.length }
+}
+function renderTaskBar(s) {
+  const bar = $('#task-bar')
+  if (!bar) return
+  if (S.current !== s.id) return
+  if (!s.todos || !s.todos.length) { bar.style.display = 'none'; bar.classList.remove('alldone', 'collapsed'); return }
+  const { total, done, cur, allDone } = todoStats(s)
+  bar.style.display = ''
+  bar.classList.toggle('alldone', allDone)
+  bar.classList.toggle('collapsed', !!s._todoCollapsed)
+  const ic = $('#tb-ic')
+  if (ic) {
+    ic.textContent = ''
+    if (allDone) ic.textContent = '✓'
+    else ic.appendChild(icon('todo', 13))
+  }
+  const curEl = $('#tb-cur')
+  if (curEl) curEl.textContent = allDone ? total + ' 项全部完成' : (cur ? cur.content : '')
+  const cnt = $('#tb-cnt')
+  if (cnt) cnt.textContent = allDone ? '✓' : done + '/' + total
+  const fill = $('#tb-fill')
+  if (fill) fill.style.width = Math.round(done / total * 100) + '%'
+  // 全部完成 → 3 秒后自己收成一条细线（点条/点会话菜单仍可看全量）
+  if (allDone && !s._todoCollapsed && !s._todoTimer) {
+    s._todoTimer = setTimeout(() => {
+      s._todoTimer = null
+      if (S.current !== s.id) return
+      const st = todoStats(s)
+      if (!st.allDone) return
+      s._todoCollapsed = true
+      renderTaskBar(s)
+    }, 3000)
+  }
+  if (!allDone && s._todoTimer) { clearTimeout(s._todoTimer); s._todoTimer = null }
+}
+/* 任务清单底部抽屉 */
+let taskSheetSession = null
+function openTaskSheet(s) {
+  if (!s || !s.todos || !s.todos.length) return
+  taskSheetSession = s.id
+  renderTaskSheet(s)
+  $('#task-ov').classList.add('open')
+  vibrate(8)
+}
+function closeTaskSheet() {
+  taskSheetSession = null
+  const ov = $('#task-ov')
+  if (ov) ov.classList.remove('open')
+}
+function renderTaskSheet(s) {
+  const body = $('#task-body')
+  if (!body) return
+  const { list, total, done, allDone } = todoStats(s)
+  const cnt = $('#task-count')
+  if (cnt) cnt.textContent = allDone ? total + ' 项全部完成' : done + '/' + total
+  // 进行中置顶，其余保持原顺序
+  const order = list.map((t, i) => ({ t, i })).sort((a, b) => (a.t.status === 'in_progress' ? -1 : b.t.status === 'in_progress' ? 1 : a.i - b.i))
+  body.textContent = ''
+  for (const { t } of order) {
+    const row = el('div', 'tk-row' + (t.status === 'in_progress' ? ' now' : t.status === 'completed' ? ' done' : ''))
+    const ico = el('span', 'tk-ico')
+    if (t.status === 'completed') ico.textContent = '✓'
+    else if (t.status === 'in_progress') ico.appendChild(el('span', 'tk-pulse'))
+    else ico.textContent = '○'
+    row.appendChild(ico)
+    row.appendChild(el('span', 'tk-txt', t.content))
+    if (t.status === 'in_progress') row.appendChild(el('span', 'tk-tag', '进行中'))
+    else if (t.status === 'completed') row.appendChild(el('span', 'tk-tag ok', '完成'))
+    body.appendChild(row)
+  }
 }
 /* 统计投影落地（上下文压力/构成/累计/运行统计），变更时刷新压力条 */
 function applyStats(s, values) {
@@ -1383,6 +1472,7 @@ function applyProjection(s, values) {
     if (sheetSession === s.id && s.models) renderSheet(s)
   }
   if (values.imageLimits) s.imageLimits = values.imageLimits
+  if ('todos' in values) setTodos(s, values.todos)
   applyStats(s, values)
 }
 /* ---- workspace 流：归档集合 + 真实工作区分组（修「归档后列表不消失」） ---- */
@@ -1428,8 +1518,14 @@ Mux.handlers.control = (v) => {
     s.queue = (v.items || []).filter((it) => it.placement !== 'context')
     if (S.current === s.id) scheduleRender(s)
   } else if (v.type === 'projection') {
-    applyProjection(sess(v.sessionId), v.values || (v.block && v.block.values))
+    // 增量投影帧是「单键单值」{sessionId, key, value}（baseline 才是整块 values）
+    applyProjectionFrame(v)
   }
+}
+function applyProjectionFrame(v) {
+  const s = sess(v.sessionId)
+  if (typeof v.key === 'string') applyProjection(s, { [v.key]: v.value })
+  else applyProjection(s, v.values || (v.block && v.block.values))
 }
 /* ---- $events 流：通知 + 审批/提问 waterfall ---- */
 Mux.handlers.events = (v) => {
@@ -1522,6 +1618,8 @@ Mux.handlers.follow = (v, meta) => {
     const pend = s.items.filter((i) => i.kind === 'user' && i.pending)
     s.items = []
     s.callArgs = new Map()
+    s._todoCalls = new Set()
+    s._pendingCalls = []
     const records = v.records || []
     for (const rec of records) foldEvent(s, rec.event || rec)
     for (const p of pend) if (!s.items.some((i) => i.rpcId === p.rpcId)) s.items.push(p)
@@ -1532,6 +1630,9 @@ Mux.handlers.follow = (v, meta) => {
     if (S.current === s.id) renderChat(s, true)
     renderListSoon()
     if (s._resolveLoad) { const r = s._resolveLoad; s._resolveLoad = null; r() }
+  } else if (v.type === 'projection') {
+    // 会话流同样推「单键单值」投影帧：todos 就靠它实时更新顶部悬置条
+    applyProjectionFrame(v)
   } else if (v.type === 'event') {
     s.updatedAt = Date.now()
     if (s.loaded) {
@@ -1680,6 +1781,7 @@ function refreshChatChrome(s) {
     else sub.textContent = s.cwd || ''
   }
   updateCtxBar(s)
+  renderTaskBar(s)
   renderQueueStrip(s)
   // 输入框 placeholder 明示发送模式（运行中按设置排队/插话；长按发送反向）
   const input2 = $('#chat-input')
@@ -2068,6 +2170,19 @@ function renderSheet(s) {
   if (!c) return
   c.textContent = ''
   c.appendChild(el('div', 'sheet-title', sessTitle(s)))
+  // ---- 任务清单（顶部条收起后的兜底入口）----
+  if (s.todos && s.todos.length) {
+    const st = todoStats(s)
+    const tSec = el('div', 'sheet-sec'); tSec.appendChild(icon('todo', 14)); tSec.appendChild(el('span', null, '任务清单'))
+    c.appendChild(tSec)
+    const tRow = el('div', 'sheet-row')
+    const tm = el('div'); tm.style.minWidth = '0'; tm.style.flex = '1'
+    tm.appendChild(el('div', 'r-name', st.allDone ? '全部完成' : (st.cur ? st.cur.content : '查看任务清单')))
+    tm.appendChild(el('div', 'r-desc', st.done + '/' + st.total + ' 已完成 · 点开看全部步骤'))
+    tRow.appendChild(tm)
+    tRow.onclick = () => { closeSheet(); openTaskSheet(s) }
+    c.appendChild(tRow)
+  }
   // ---- 模型 ----
   const mSec = el('div', 'sheet-sec'); mSec.appendChild(icon('sliders', 14)); mSec.appendChild(el('span', null, '模型'))
   c.appendChild(mSec)
@@ -2381,6 +2496,12 @@ function buildShell() {
       <button class="nav-btn" id="chat-more" aria-label="会话设置"><span class="ic-slot" data-ic="more"></span></button>
       <div class="ctx-bar" aria-hidden="true"><div class="ctx-fill" id="ctx-fill"></div></div>
     </div></div>
+    <div class="task-bar" id="task-bar" role="button" tabindex="0" aria-label="任务清单" style="display:none">
+      <span class="tb-ic" id="tb-ic"></span>
+      <span class="tb-cur" id="tb-cur"></span>
+      <span class="tb-cnt" id="tb-cnt"></span>
+      <span class="tb-track"><i class="tb-fill" id="tb-fill"></i></span>
+    </div>
     <div class="chat-scroll" id="chat-scroll"></div>
     <div class="composer-wrap">
       <div class="q-strip" id="q-strip"></div>
@@ -2424,6 +2545,17 @@ function buildShell() {
         <button class="think-close" id="think-close" type="button" aria-label="关闭">✕</button>
       </div>
       <div class="think-body" id="think-body"></div>
+    </div>
+  </div>
+  <div class="sheet-overlay" id="task-ov" aria-hidden="true">
+    <div class="sheet task-sheet" role="dialog" aria-label="任务清单">
+      <div class="grabber"></div>
+      <div class="task-head">
+        <span class="task-title">任务清单</span>
+        <span class="task-count" id="task-count"></span>
+        <button class="think-close" id="task-close" type="button" aria-label="关闭">✕</button>
+      </div>
+      <div class="task-body" id="task-body"></div>
     </div>
   </div>
   <div class="sheet-overlay" id="q-ov" aria-hidden="true">
@@ -2500,6 +2632,34 @@ function buildShell() {
       const shouldClose = dy > 100
       sheet.style.transform = ''
       if (shouldClose) closeThink()
+      dy = 0
+    }
+    sheet.addEventListener('touchend', finish)
+    sheet.addEventListener('touchcancel', finish)
+  })()
+  // 任务清单抽屉：顶部常驻条点击打开；背景/✕ 关闭；同样支持下拽关闭
+  $('#task-ov').addEventListener('click', (e) => { if (e.target.id === 'task-ov') closeTaskSheet() })
+  $('#task-close').onclick = closeTaskSheet
+  $('#task-bar').onclick = () => { const s = S.sessions.get(S.current); if (s && s.todos && s.todos.length) openTaskSheet(s) }
+  ;(function () {
+    const sheet = $('#task-ov .sheet'), body = $('#task-body')
+    let dragging = false, sy = 0, dy = 0
+    sheet.addEventListener('touchstart', (e) => {
+      if (e.target.closest('.think-close')) return
+      if (body.scrollTop <= 0 || e.target.closest('.grabber')) { dragging = true; sy = e.touches[0].clientY; dy = 0 }
+    }, { passive: true })
+    sheet.addEventListener('touchmove', (e) => {
+      if (!dragging) return
+      dy = Math.max(0, e.touches[0].clientY - sy)
+      if (dy > 0 && body.scrollTop <= 0) { sheet.classList.add('dragging'); sheet.style.transform = 'translateY(' + dy + 'px)'; if (e.cancelable) e.preventDefault() }
+    }, { passive: false })
+    const finish = () => {
+      if (!dragging) return
+      dragging = false
+      sheet.classList.remove('dragging')
+      const shouldClose = dy > 100
+      sheet.style.transform = ''
+      if (shouldClose) closeTaskSheet()
       dy = 0
     }
     sheet.addEventListener('touchend', finish)
