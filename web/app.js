@@ -948,13 +948,7 @@ function renderList() {
     wrap.appendChild(el('div', 'empty-state', '还没有会话\n点下方「新会话」开始'))
     return
   }
-  // 快速续聊：置顶「继续上次会话」（时间视图下第一张卡就是最近会话，无需重复）
-  if (!q && S.listMode !== 'time' && !S.wsDrill) {
-    let lastId = null
-    try { lastId = localStorage.getItem('dshm-last-open') } catch (e) {}
-    const last = lastId && visible.find((s) => s.id === lastId)
-    if (last) wrap.appendChild(resumeRow(last))
-  }
+  // 「继续上次会话」置顶入口已移除：两级工作区视图 + 「最近活跃」时间视图都能一步直达最近对话
   // 搜索结果是跨工作区的检索：平铺 + 卡片标注工作区，比钻取更直接
   if (q) {
     for (const s of visible) wrap.appendChild(sessionCard(s, true))
@@ -1029,22 +1023,6 @@ function setListTitle(name) {
 function listScrollTop() {
   const sc = $('#list-scroll')
   if (sc) sc.scrollTop = 0
-}
-/* 置顶续聊卡：样式区别于普通会话卡，避免混淆 */
-function resumeRow(s) {
-  const row = el('div', 'resume-row')
-  row.setAttribute('role', 'button')
-  row.setAttribute('tabindex', '0')
-  const ico = el('div', 'resume-ico'); ico.appendChild(icon('bolt', 16))
-  const mid = el('div', 'resume-mid')
-  mid.appendChild(el('div', 'resume-label', '继续上次会话'))
-  mid.appendChild(el('div', 'resume-title', sessTitle(s)))
-  row.append(ico, mid)
-  row.appendChild(el('span', 'resume-time', fmtTime(s.updatedAt)))
-  const open = () => { location.hash = '#/s/' + s.id }
-  row.onclick = open
-  row.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open() } }
-  return row
 }
 function sessionCard(s, showWs) {
   const card = el('div', 'session-card')
@@ -1826,7 +1804,7 @@ async function openSession(id, force) {
   const s = sess(id)
   S.current = id
   S.todoMode = false
-  try { localStorage.setItem('dshm-last-open', id) } catch (e) {}  // 供列表页「继续上次会话」
+
   $('#chat-title').textContent = sessTitle(s)
   showView('chat')
   s._newBelow = false
@@ -2200,18 +2178,29 @@ async function sendPrompt(id, text, images, forceMode) {
     // 运行中：按「运行中发送」设置（默认排队，与桌面一致）；长按发送可本次反向（forceMode）。
     // 宿主判定不可 steer 时自动降级排队——running 状态过期不该让用户的消息卡住
     const mode = (!s.running) ? 'queue' : (forceMode || busyEnter())
+    let finalMode = mode
     try {
       await rpc('session/prompt', { request: { requestId: rpcId, sessionId: id, mode, content, clientTimeZone: tz() } })
     } catch (e) {
       if (mode === 'steer' && e.message && /steer/i.test(e.message)) {
+        finalMode = 'queue'
         await rpc('session/prompt', { request: { requestId: rpcId, sessionId: id, mode: 'queue', content, clientTimeZone: tz() } })
       } else throw e
     }
-    // RPC 已受理 → 传输完成（排队/插话交给宿主）。气泡不再显示「发送中」；
-    // 等 user/message 事件到达时就地转正（rpcId 匹配），队列 chip 的文案去重覆盖排队期
-    item.pending = false
-    item.sent = true
-    if (S.current === id) scheduleRender(s)
+    // RPC 已受理 → 传输完成。分两种呈现：
+    //  - 真正排队（本轮还在跑）：消息还没进对话流，撤下乐观气泡，交给输入框上方的排队 chip。
+    //    重进会话后宿主快照本来就是这个形态（快照不含未消费的排队消息），此前实时路径与之
+    //    不一致，表现即「排队的消息混在对话流里、chip 不出现，退出重进才正常」。
+    //  - 其余（空闲新开一轮 / 插话）：气泡保留，等 user/message 事件到达后就地转正（rpcId 匹配）
+    if (finalMode === 'queue' && s.running) {
+      const i = s.items.indexOf(item)
+      if (i >= 0) s.items.splice(i, 1)
+      if (S.current === id) { renderChat(s); renderQueueStrip(s) }
+    } else {
+      item.pending = false
+      item.sent = true
+      if (S.current === id) scheduleRender(s)
+    }
   } catch (e) {
     item.pending = false; item.failed = true
     if (S.current === id) renderChat(s)

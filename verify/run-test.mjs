@@ -10,17 +10,22 @@ import os from 'node:os'
 import { fileURLToPath } from 'node:url'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
-const PORT = 8617
+const PORT = Number(process.env.VERIFY_PORT || 8617)
 const BASE = `http://127.0.0.1:${PORT}`
 const CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const results = []
+let STAGE = 'boot'
+const trace = (s) => { STAGE = s; console.error('[trace] ' + s) }
 const note = (name, pass, detail) => { results.push({ name, pass, detail }); console.log((pass ? '✅' : '❌') + ' ' + name + (detail ? ' — ' + detail : '')) }
+setTimeout(() => { console.error('WATCHDOG: 卡在阶段 ' + STAGE); process.exit(2) }, 90_000).unref()
 
 /* ---------- 启动 stub 宿主 ---------- */
 const server = spawn(process.execPath, [path.join(HERE, 'server.mjs'), String(PORT)], { stdio: ['ignore', 'pipe', 'pipe'] })
 server.stderr.on('data', (d) => process.stderr.write('[stub] ' + d))
+trace('stub 启动中')
 for (let i = 0; i < 50; i++) { try { await fetch(BASE + '/__log'); break } catch (e) { await sleep(100) } }
+trace('stub 就绪')
 
 /* ---------- 启动 Chrome headless ---------- */
 const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'dshm-verify-'))
@@ -39,8 +44,10 @@ const cleanup = () => { try { chrome.kill('SIGKILL') } catch (e) {} try { server
 process.on('exit', cleanup)
 
 /* ---------- 极简 CDP 客户端（Node 自带 WebSocket） ---------- */
+trace('连接 CDP: ' + cdpUrl)
 const ws = new WebSocket(cdpUrl)
-await new Promise((r, j) => { ws.onopen = r; ws.onerror = j })
+await new Promise((r, j) => { ws.onopen = r; ws.onerror = () => j(new Error('ws error')) })
+trace('CDP 已连接')
 let msgId = 0
 const pending = new Map()
 ws.onmessage = (ev) => {
@@ -51,10 +58,13 @@ const cdp = (method, params = {}, sessionId) => new Promise((resolve, reject) =>
   const id = ++msgId
   pending.set(id, { resolve, reject })
   ws.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }))
+  setTimeout(() => { if (pending.has(id)) { pending.delete(id); reject(new Error('CDP 超时: ' + method)) } }, 10_000).unref()
 })
 const { targetId } = await cdp('Target.createTarget', { url: BASE + '/m/' })
+trace('页面 target 已创建')
 const { sessionId } = await cdp('Target.attachToTarget', { targetId, flatten: true })
 await cdp('Runtime.enable', {}, sessionId)
+trace('会话已附着')
 const evalJs = async (expression) => {
   const r = await cdp('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true }, sessionId)
   if (r.exceptionDetails) throw new Error('page eval failed: ' + JSON.stringify(r.exceptionDetails.exception?.description || r.exceptionDetails.text))

@@ -166,4 +166,4 @@ server.on('upgrade', (q, sock) => {
   sock.on('error', () => {})
 })
 
-server.listen(PORT, '127.0.0.1', () => console.log('stub-host ready on http://127.0.0.1:' + PORT))
+server.listen(PORT, '127.0.0.1', () => console.log('READY ' + server.address().port))

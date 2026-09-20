@@ -208,21 +208,6 @@ html.light .ws-row .wsr-n { background:rgba(15,23,42,.06); }
 .badge.done .b-dot { display:none; }
 @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.25} }
 
-/* 置顶「继续上次会话」快捷卡 */
-.resume-row {
-  display:flex; align-items:center; gap:11px;
-  margin: 8px 12px 4px; padding: 12px 15px;
-  background: var(--accent-soft); border: 1px solid rgba(59,130,246,.35);
-  border-radius: 15px; cursor: pointer;
-  transition: transform .16s var(--ease-out), background-color .16s ease;
-}
-.resume-row:active { transform: scale(.985); }
-.resume-ico { width:32px; height:32px; border-radius:9px; background:var(--accent); color:#fff; display:flex; align-items:center; justify-content:center; flex:none; }
-.resume-mid { flex:1; min-width:0; }
-.resume-label { font-size:11.5px; color:#6aa6ff; font-weight:600; }
-.resume-title { font-size:15px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; margin-top:1px; }
-.resume-time { font-size:11.5px; color:var(--text-3); flex:none; font-variant-numeric:tabular-nums; }
-
 .empty-state { padding: 80px 30px; text-align:center; color:var(--text-3); font-size:14px; line-height:1.8; white-space:pre-line; }
 .empty-state .retry { display:inline-block; margin-top:12px; padding:9px 20px; border:1px solid var(--line); border-radius:12px; background:var(--bg-card); color:var(--accent); font-size:14px; }
 
@@ -470,7 +455,6 @@ html.light .ws-row .wsr-n { background:rgba(15,23,42,.06); }
 .new-input { margin:0 12px; background:var(--bg-card); border:.5px solid var(--line); border-radius:15px; padding:13px 15px; min-height:90px; font-size:16px; color:var(--text); outline:none; max-width:756px; }
 .new-input:empty::before { content:attr(data-ph); color:var(--text-3); }
 @media (min-width: 700px) {
-  .swipe-wrap, .resume-row { max-width: 756px; margin-left:auto; margin-right:auto; }
   .pick-ws, .new-input, .start-btn { margin-left:auto; margin-right:auto; }
   .start-btn { display:block; }
 }
@@ -601,7 +585,6 @@ html.light .m-meta .retry-send,
 html.light .running-bar,
 html.light .chip.sel,
 html.light .cmd-more,
-html.light .resume-label { color: #2563eb; }
 html.light .badge.running .b-dot { background: #2563eb; }
 /* 白底上消失的"白纱"元素 */
 html.light .badge.done { background: rgba(15,23,42,.07); }
