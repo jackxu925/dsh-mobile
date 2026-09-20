@@ -475,6 +475,7 @@ html.light .ws-row .wsr-n { background:rgba(15,23,42,.06); }
   display:flex; flex-direction:column;
   padding-bottom: env(safe-area-inset-bottom, 0px);
   border-top:.5px solid var(--line);
+  position:relative; overflow:hidden;  /* 二级推送面板（.sheet-sub）的定位上下文 */
 }
 .sheet.dragging { transition:none; }
 .sheet-overlay.open .sheet { transform:none; }
@@ -559,6 +560,27 @@ html.light .approval-cmd { background:rgba(180,83,9,.08); color:#b45309; }
 html.light #view-chat { box-shadow:-18px 0 44px rgba(15,23,42,.16); }
 html.light .sk-bubble { background:linear-gradient(100deg,#e9ecf1 30%,#f7f8fa 50%,#e9ecf1 70%); background-size:200% 100%; }
 html.light .sheet { box-shadow:0 -12px 44px rgba(15,23,42,.18); }
+/* ---- ⋯ 菜单二级推送面板（方案 A）：从右滑入，返回回菜单 ---- */
+.sheet-sub {
+  position:absolute; inset:0; z-index:5;
+  background:var(--bg-elev);
+  transform:translateX(103%); transition:transform .32s var(--ease-out);
+  display:flex; flex-direction:column;
+}
+.sheet-sub.in { transform:none; }
+.sub-head { flex:none; display:flex; align-items:center; gap:2px; padding:8px 6px 10px; border-bottom:.5px solid var(--line); }
+.sub-back { min-width:44px; height:44px; border:none; background:none; color:var(--accent); font-size:14.5px; font-family:var(--font); display:flex; align-items:center; justify-content:center; }
+.sub-back:active { opacity:.55; }
+.sub-title { font-size:15.5px; font-weight:700; }
+.sub-body { flex:1; overflow-y:auto; -webkit-overflow-scrolling:touch; padding:8px 0 22px; }
+/* 设置行的当前值 + 展开箭头 */
+.sheet-row .r-val { font-size:13px; color:var(--text-3); flex:none; max-width:45%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.sheet-row .r-chev { color:var(--text-3); font-size:14px; flex:none; line-height:1; }
+/* 紧凑模型行 */
+.sheet-row.model-row { min-height:44px; padding:10px 14px; }
+.sheet-row.model-row .r-name { font-size:14px; font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+html.light .sheet-sub { background:#fff; }
+html.light .sub-head { border-bottom:1px solid rgba(15,23,42,.08); }
 html.light .toast { background:rgba(15,23,42,.94); }
 html.light .copy-pill { background:rgba(15,23,42,.95); }
 html.light .conn-pill { background:#fff; }

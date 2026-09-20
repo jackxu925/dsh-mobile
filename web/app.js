@@ -122,12 +122,21 @@ function dayLabel(ts) {
 
 /* 裸 URL → 可点 <a>（点按拉起系统浏览器）。
  * 跳过 [文字](链接) 语法内的地址（负向后顾）；行内代码里的 URL 也链接化
- *（渲染为可点的等宽链接——用户高频场景）。老浏览器不支持 lookbehind 时降级。 */
+ *（渲染为可点的等宽链接——用户高频场景）。老浏览器不支持 lookbehind 时降级。
+ * 字符类排除 `*`：否则 **http://x** 的收尾 ** 会被吞进 URL，随后的粗体替换再把
+ * <strong> 注进 href，链接就变成了 …sheet.html%3C/strong%3E 这种坏地址。
+ * 排除非 ASCII（\u0080-\uffff）：URL 不含原始中文/全角标点；不排除的话
+ * 「http://x.com/a）还有」会把 URL 后面的整句中文都吞进链接。 */
 let BARE_URL_RE
-try { BARE_URL_RE = new RegExp('(?<!\\]\\()(https?:\\/\\/[^\\s<>"\')\\]`]+)', 'g') }
-catch (e) { BARE_URL_RE = /(https?:\/\/[^\s<>"')\]`]+)/g }
+try { BARE_URL_RE = new RegExp('(?<!\\]\\()(https?:\\/\\/[^\\s<>"\')\\]`*\\u0080-\\uffff]+)', 'g') }
+catch (e) { BARE_URL_RE = /(https?:\/\/[^\s<>"')\]`*\u0080-\uffff]+)/g }
+/* 句尾 ASCII 标点不属于链接（中文标点已被字符类挡在外面），移出 <a> 之外 */
+const URL_TRAIL_RE = /[.,;:!?…。．，、）)；：！？」』]+$/
 function anchorize(u) {
-  return '<a href="' + u + '" target="_blank" rel="noopener">' + u + '</a>'
+  let url = u, trail = ''
+  const t = url.match(URL_TRAIL_RE)
+  if (t) { trail = t[0]; url = url.slice(0, -trail.length) }
+  return '<a href="' + url + '" target="_blank" rel="noopener">' + url + '</a>' + trail
 }
 /* 用户气泡专用：转义 + 裸 URL 转链接（保留换行交给 CSS pre-wrap） */
 function linkifyText(text) {
@@ -1549,11 +1558,11 @@ function applyProjection(s, values) {
   }
   if (values.permissions && Array.isArray(values.permissions.options)) {
     s.permissions = values.permissions
-    if (sheetSession === s.id) renderSheet(s)
+    if (sheetSession === s.id) refreshSheetViews(s)
   }
   if (values.modelSelection && values.modelSelection.next) {
     s.modelSel = values.modelSelection.next
-    if (sheetSession === s.id && s.models) renderSheet(s)
+    if (sheetSession === s.id && s.models) refreshSheetViews(s)
   }
   if (values.imageLimits) s.imageLimits = values.imageLimits
   if ('todos' in values) setTodos(s, values.todos)
@@ -2044,6 +2053,7 @@ function initSheetDrag() {
   const content = $('#sheet-content')
   let dragging = false, startY = 0, dy = 0
   sheet.addEventListener('touchstart', (e) => {
+    if (e.target.closest('.sheet-sub')) return  // 二级面板内：交给面板自己滚动
     const fromGrabber = !!e.target.closest('.grabber')
     if (fromGrabber || content.scrollTop <= 0) { dragging = true; startY = e.touches[0].clientY; dy = 0 }
   }, { passive: true })
@@ -2221,22 +2231,71 @@ async function cancelSession(id) {
 let sheetSession = null
 function loadModels(s) {
   rpc('session/modelCatalog', {})
-    .then((v) => { s.models = v; if (sheetSession === s.id) renderSheet(s) })
-    .catch((e) => { s.models = { error: e.message }; if (sheetSession === s.id) renderSheet(s) })
+    .then((v) => { s.models = v; if (sheetSession === s.id) refreshSheetViews(s) })
+    .catch((e) => { s.models = { error: e.message }; if (sheetSession === s.id) refreshSheetViews(s) })
 }
 function openSheet(s) {
   sheetSession = s.id
+  closeSubPanel()
   renderSheet(s)
   $('#sheet-overlay').classList.add('open')
   if (!s.models) loadModels(s)
 }
-function closeSheet() { sheetSession = null; $('#sheet-overlay').classList.remove('open') }
+function closeSheet() { sheetSession = null; closeSubPanel(); $('#sheet-overlay').classList.remove('open') }
+
+/* ---- ⋯ 菜单二级推送面板（方案 A）：菜单永远一屏，选值类操作最多深一级 ---- */
+let subPanelKind = null   // 'model' | 'perm' | 'send' | 'stats' | null
+function openSubPanel(kind, title, build) {
+  subPanelKind = kind
+  $('#sub-title').textContent = title
+  const body = $('#sub-body')
+  body.textContent = ''
+  body.scrollTop = 0
+  build(body)
+  const sub = $('#sheet-sub')
+  sub.classList.add('in')
+  sub.setAttribute('aria-hidden', 'false')
+}
+function closeSubPanel() {
+  subPanelKind = null
+  const sub = $('#sheet-sub')
+  if (sub) { sub.classList.remove('in'); sub.setAttribute('aria-hidden', 'true') }
+}
+/* 菜单 + 当前打开的二级面板一起刷新（投影/目录异步到位时用） */
+function refreshSheetViews(s) {
+  if (sheetSession !== s.id) return
+  renderSheet(s)
+  if (subPanelKind === 'model') renderModelPanel(s)
+  else if (subPanelKind === 'perm') renderPermPanel(s)
+  else if (subPanelKind === 'send') renderSendPanel(s)
+  else if (subPanelKind === 'stats') renderStatsPanel(s)
+}
+/* 当前模型的展示名（含强度），如「glm-5.3 · Max」 */
+function modelLabel(s) {
+  const m = s.models
+  if (!m) return '加载中…'
+  if (m.error) return '加载失败'
+  const cur = s.modelSel || m.default
+  if (!cur) return ''
+  let name = cur.model, effort = ''
+  for (const g of m.groups || []) {
+    if (g.id !== cur.provider) continue
+    for (const mod of g.models || []) {
+      if (mod.id !== cur.model) continue
+      name = mod.name
+      const efs = mod.reasoning && mod.reasoning.efforts
+      const ef = efs && efs.find((x) => x.id === cur.reasoningEffort)
+      if (ef) effort = ' · ' + ef.name
+    }
+  }
+  return name + effort
+}
 
 async function applyModel(s, group, mod, effort) {
   try {
     const v = await rpc('session/selectModel', { request: { sessionId: s.id, provider: group.id, model: mod.id, ...(effort ? { reasoningEffort: effort } : {}) } })
     if (v && v.selected) s.modelSel = v.selected
-    renderSheet(s)
+    refreshSheetViews(s)
     vibrate(10)
     toast('已切换：' + mod.name + (effort ? ' · ' + effort : ''))
   } catch (e) { toast('切换失败：' + e.message, true) }
@@ -2250,8 +2309,8 @@ async function applyPermission(s, opt) {
     if (v.result && v.result.kind !== 'success') { toast(v.result.text || '切换失败', true); return }
     // 修「提示成功但界面没动」：control 流不一定广播该投影，先乐观更新 ✓，
     // 再用 session/list（唯一事实源）对齐真实值
-    if (s.permissions) { s.permissions = { ...s.permissions, currentValue: opt.value }; renderSheet(s) }
-    toast('权限已切换：' + opt.name)
+    if (s.permissions) { s.permissions = { ...s.permissions, currentValue: opt.value }; refreshSheetViews(s) }
+    toast('权限已切换：' + permLabel(opt.value))
     loadBaseSoon()
   } catch (e) { toast('切换失败：' + e.message, true) }
 }
@@ -2261,53 +2320,45 @@ function loadBaseSoon() {
   baseSoonTimer = setTimeout(() => { baseSoonTimer = null; loadBase() }, 500)
 }
 
+/* ⋯ 菜单（方案 A）：一屏设置行，行右侧常驻当前值；点行进入二级推送面板 */
 function renderSheet(s) {
   const c = $('#sheet-content')
   if (!c) return
   c.textContent = ''
   c.appendChild(el('div', 'sheet-title', sessTitle(s)))
-  // ---- 任务清单（顶部条收起后的兜底入口）----
+  // 通用设置行：名称 + 描述 + 当前值 + ›
+  const valueRow = (name, desc, value, onClick) => {
+    const r = el('div', 'sheet-row')
+    const mid = el('div'); mid.style.minWidth = '0'; mid.style.flex = '1'
+    mid.appendChild(el('div', 'r-name', name))
+    if (desc) mid.appendChild(el('div', 'r-desc', desc))
+    r.appendChild(mid)
+    r.appendChild(el('span', 'r-val', value || ''))
+    r.appendChild(el('span', 'r-chev', '›'))
+    r.onclick = onClick
+    return r
+  }
+  // ---- 任务清单（有任务才出现；点开任务抽屉）----
   if (s.todos && s.todos.length) {
     const st = todoStats(s)
-    const tSec = el('div', 'sheet-sec'); tSec.appendChild(icon('todo', 14)); tSec.appendChild(el('span', null, '任务清单'))
-    c.appendChild(tSec)
-    const tRow = el('div', 'sheet-row')
-    const tm = el('div'); tm.style.minWidth = '0'; tm.style.flex = '1'
-    tm.appendChild(el('div', 'r-name', st.allDone ? '全部完成' : (st.cur ? st.cur.content : '查看任务清单')))
-    tm.appendChild(el('div', 'r-desc', st.done + '/' + st.total + ' 已完成 · 点开看全部步骤'))
-    tRow.appendChild(tm)
-    tRow.onclick = () => { closeSheet(); openTaskSheet(s) }
-    c.appendChild(tRow)
+    c.appendChild(valueRow('任务清单', st.done + '/' + st.total + ' 已完成', st.allDone ? '✓ 全部完成' : '进行中', () => { closeSheet(); openTaskSheet(s) }))
   }
   // ---- 模型 ----
-  const mSec = el('div', 'sheet-sec'); mSec.appendChild(icon('sliders', 14)); mSec.appendChild(el('span', null, '模型'))
-  c.appendChild(mSec)
-  const m = s.models
-  if (!m) c.appendChild(el('div', 'sheet-note', '加载中…'))
-  else if (m.error) {
-    const note = el('div', 'sheet-note', '加载失败：' + m.error)
-    const retry = el('button', 'sheet-retry', '重试')
-    retry.type = 'button'
-    retry.onclick = () => { s.models = null; renderSheet(s); loadModels(s) }
-    note.appendChild(retry)
-    c.appendChild(note)
-  } else {
-    const cur = s.modelSel || m.default
-    for (const g of m.groups || []) {
-      c.appendChild(el('div', 'sheet-group', g.name))
-      for (const mod of g.models || []) c.appendChild(modelRow(s, g, mod, cur))
-    }
-    for (const f of m.failures || []) c.appendChild(el('div', 'sheet-note', '⚠️ ' + f.name + '：' + f.message))
-  }
+  c.appendChild(valueRow('模型', '切换模型 / 思考强度', modelLabel(s), () => openModelPanel(s)))
   // ---- 权限 ----
-  const pSec = el('div', 'sheet-sec'); pSec.appendChild(icon('lock', 14)); pSec.appendChild(el('span', null, '权限'))
-  c.appendChild(pSec)
   const perms = s.permissions
-  if (!perms) c.appendChild(el('div', 'sheet-note', '暂不可用（会话历史加载后显示）'))
-  else for (const opt of perms.options) c.appendChild(permRow(s, opt, perms.currentValue))
-  // ---- 操作 ----
-  const aSec = el('div', 'sheet-sec'); aSec.appendChild(icon('copy', 14)); aSec.appendChild(el('span', null, '操作'))
-  c.appendChild(aSec)
+  const permName = () => {
+    if (!perms) return '加载中…'
+    return permLabel(perms.currentValue)
+  }
+  c.appendChild(valueRow('权限', '文件与命令的边界', permName(), () => openPermPanel(s)))
+  // ---- 运行中发送 ----
+  c.appendChild(valueRow('运行中发送', '排队或插话', busyEnter() === 'queue' ? '排队' : '插话', () => openSendPanel(s)))
+  // ---- 统计（摘要值，点开看全量）----
+  const p = s.ctxPressure
+  const statVal = p && p.contextWindow ? Math.round(p.pressureTokens / p.contextWindow * 100) + '% · ' + fmtCtxTok(p.pressureTokens) : '—'
+  c.appendChild(valueRow('统计', '上下文 / tokens / 耗时', statVal, () => openStatsPanel(s)))
+  // ---- 复制全部对话（直接动作）----
   const copyRow = el('div', 'sheet-row')
   const cm = el('div'); cm.style.minWidth = '0'; cm.style.flex = '1'
   cm.appendChild(el('div', 'r-name', '复制全部对话'))
@@ -2319,24 +2370,100 @@ function renderSheet(s) {
     toast('已复制 ' + s.items.filter((i) => i.kind === 'user' || i.kind === 'assistant').length + ' 条消息')
   }
   c.appendChild(copyRow)
-  // ---- 统计 ----
-  renderStatsSection(s, c)
-  // ---- 运行中发送 ----
-  const beSec = el('div', 'sheet-sec'); beSec.appendChild(icon('send', 14)); beSec.appendChild(el('span', null, '运行中发送'))
-  c.appendChild(beSec)
+  c.appendChild(el('div', 'sheet-note', '菜单就这一屏。点带 › 的行进入对应设置。'))
+}
+/* ---- 模型面板：顶部当前模型强度（只换强度一步到位）+ 分组单行模型清单 ---- */
+function openModelPanel(s) {
+  openSubPanel('model', '模型', () => renderModelPanel(s))
+}
+function renderModelPanel(s) {
+  const body = $('#sub-body')
+  if (!body) return
+  body.textContent = ''
+  const m = s.models
+  if (!m) { body.appendChild(el('div', 'sheet-note', '加载中…')); return }
+  if (m.error) {
+    const note = el('div', 'sheet-note', '加载失败：' + m.error)
+    const retry = el('button', 'sheet-retry', '重试')
+    retry.type = 'button'
+    retry.onclick = () => { s.models = null; loadModels(s); body.appendChild(el('div', 'sheet-note', '加载中…')) }
+    note.appendChild(retry)
+    body.appendChild(note)
+    return
+  }
+  const cur = s.modelSel || m.default
+  const curMod = (() => {
+    for (const g of m.groups || []) for (const mod of g.models || []) if (g.id === cur.provider && mod.id === cur.model) return mod
+    return null
+  })()
+  // 思考强度：仅当前模型支持时显示，选择即切换（不必再进一层）
+  if (curMod && curMod.reasoning && curMod.reasoning.efforts && curMod.reasoning.efforts.length) {
+    const g = (() => { for (const gg of m.groups || []) for (const mm of gg.models || []) if (gg.id === cur.provider && mm.id === cur.model) return gg; return null })()
+    body.appendChild(el('div', 'sheet-group', '思考强度 · ' + curMod.name))
+    const chips = el('div', 'chip-row')
+    for (const ef of curMod.reasoning.efforts) {
+      const chip = el('span', 'chip' + (ef.id === cur.reasoningEffort ? ' sel' : ''), ef.name)
+      chip.title = ef.description || ''
+      chip.onclick = () => { vibrate(8); if (ef.id !== cur.reasoningEffort && g) applyModel(s, g, curMod, ef.id) }
+      chips.appendChild(chip)
+    }
+    body.appendChild(chips)
+  } else {
+    body.appendChild(el('div', 'sheet-note', '当前模型没有思考强度选项'))
+  }
+  body.appendChild(el('div', 'sheet-group', '切换模型'))
+  for (const g of m.groups || []) {
+    body.appendChild(el('div', 'sheet-group', g.name))
+    for (const mod of g.models || []) body.appendChild(modelRow(s, g, mod, cur))
+  }
+  for (const f of m.failures || []) body.appendChild(el('div', 'sheet-note', '⚠️ ' + f.name + '：' + f.message))
+}
+/* ---- 权限面板 ---- */
+function openPermPanel(s) {
+  openSubPanel('perm', '权限', () => renderPermPanel(s))
+}
+function renderPermPanel(s) {
+  const body = $('#sub-body')
+  if (!body) return
+  body.textContent = ''
+  const perms = s.permissions
+  if (!perms) body.appendChild(el('div', 'sheet-note', '暂不可用（会话历史加载后显示）'))
+  else for (const opt of perms.options) body.appendChild(permRow(s, opt, perms.currentValue))
+}
+/* ---- 运行中发送面板 ---- */
+function openSendPanel(s) {
+  openSubPanel('send', '运行中发送', () => renderSendPanel(s))
+}
+function renderSendPanel(s) {
+  const body = $('#sub-body')
+  if (!body) return
+  body.textContent = ''
   const modeRow = el('div', 'mode-row')
   for (const m of ['queue', 'steer']) {
     const chip = el('span', 'chip' + (busyEnter() === m ? ' sel' : ''), m === 'queue' ? '排队（默认）' : '插话')
-    chip.onclick = () => { vibrate(8); setBusyEnter(m); renderSheet(s) }
+    chip.onclick = () => { vibrate(8); setBusyEnter(m); refreshSheetViews(s) }
     modeRow.appendChild(chip)
   }
-  c.appendChild(modeRow)
-  c.appendChild(el('div', 'sheet-note', '运行中点发送按此设置投递；长按发送按钮可本次反向。排队后可点输入框上方的 chip 编辑、转插话或删除。'))
+  body.appendChild(modeRow)
+  body.appendChild(el('div', 'sheet-note', '运行中点发送按此设置投递；长按发送按钮可本次反向。排队后可点输入框上方的 chip 编辑、转插话或删除。'))
 }
-/* 统计区：上下文环 + 构成 + 累计 + 运行统计 */
-function renderStatsSection(s, c) {
-  const stSec = el('div', 'sheet-sec'); stSec.appendChild(icon('bolt', 14)); stSec.appendChild(el('span', null, '统计'))
-  c.appendChild(stSec)
+/* ---- 统计面板（原 renderStatsSection 的全部内容）---- */
+function openStatsPanel(s) {
+  openSubPanel('stats', '统计', () => renderStatsPanel(s))
+}
+function renderStatsPanel(s) {
+  const body = $('#sub-body')
+  if (!body) return
+  body.textContent = ''
+  renderStatsSection(s, body, true)
+}
+
+/* 统计区：上下文环 + 构成 + 累计 + 运行统计（noHeader=放在二级面板里时省掉小节头） */
+function renderStatsSection(s, c, noHeader) {
+  if (!noHeader) {
+    const stSec = el('div', 'sheet-sec'); stSec.appendChild(icon('bolt', 14)); stSec.appendChild(el('span', null, '统计'))
+    c.appendChild(stSec)
+  }
   const p = s.ctxPressure
   if (!p || !p.contextWindow) { c.appendChild(el('div', 'sheet-note', '暂无统计（会话加载后显示）')); return }
   const pct = Math.max(0, Math.min(100, Math.round(p.pressureTokens / p.contextWindow * 100)))
@@ -2397,7 +2524,7 @@ function renderStatsSection(s, c) {
 let sheetSoonTimer = null
 function renderSheetSoon(s) {
   if (sheetSoonTimer) return
-  sheetSoonTimer = setTimeout(() => { sheetSoonTimer = null; if (sheetSession === s.id) renderSheet(s) }, 250)
+  sheetSoonTimer = setTimeout(() => { sheetSoonTimer = null; if (sheetSession === s.id) refreshSheetViews(s) }, 250)
 }
 /* 整段对话导出为纯文本 */
 function sessionText(s) {
@@ -2411,41 +2538,35 @@ function sessionText(s) {
   return lines.filter(Boolean).join('\n\n')
 }
 
+/* 模型行（紧凑单行）：15 个模型全铺开也不至于失控；描述不展示，强度在面板顶部统一处理 */
 function modelRow(s, g, mod, current) {
   const isCur = !!(current && current.provider === g.id && current.model === mod.id)
-  const efforts = mod.reasoning && Array.isArray(mod.reasoning.efforts) ? mod.reasoning.efforts : []
-  const row = el('div', 'sheet-row sheet-row-col' + (isCur ? ' sel' : ''))
-  const top = el('div', 'sheet-row-top')
+  const row = el('div', 'sheet-row model-row' + (isCur ? ' sel' : ''))
   const mid = el('div'); mid.style.minWidth = '0'; mid.style.flex = '1'
   mid.appendChild(el('div', 'r-name', mod.name))
-  if (mod.description) mid.appendChild(el('div', 'r-desc', mod.description))
-  top.appendChild(mid)
-  if (isCur) top.appendChild(el('span', 'check', '✓'))
-  top.onclick = () => {
+  row.appendChild(mid)
+  if (isCur) row.appendChild(el('span', 'check', '✓'))
+  row.onclick = () => {
     if (isCur) return
     applyModel(s, g, mod, (mod.reasoning && mod.reasoning.defaultEffort) || undefined)
   }
-  row.appendChild(top)
-  // 推理强度：仅当前模型且模型支持时显示
-  if (isCur && efforts.length) {
-    const chips = el('div', 'chip-row')
-    const curEffort = current.reasoningEffort || mod.reasoning.defaultEffort
-    for (const ef of efforts) {
-      const chip = el('span', 'chip' + (ef.id === curEffort ? ' sel' : ''), ef.name)
-      chip.title = ef.description || ''
-      chip.onclick = (e) => { e.stopPropagation(); if (ef.id !== curEffort) applyModel(s, g, mod, ef.id) }
-      chips.appendChild(chip)
-    }
-    row.appendChild(chips)
-  }
   return row
 }
+/* 宿主的权限 option.name 就是原始值（read-only 等），这里给出中文标签与说明 */
+const PERM_LABEL = {
+  'read-only': ['只读', '只能读文件与检索，不能改动任何东西'],
+  'workspace-write': ['工作区写入', '可在工作区内读写文件、执行命令'],
+  'danger-full-access': ['完全访问', '不做限制，含工作区外的读写与危险命令'],
+}
+const permLabel = (v) => (PERM_LABEL[v] ? PERM_LABEL[v][0] : v)
+const permDesc = (opt) => (PERM_LABEL[opt.value] ? PERM_LABEL[opt.value][1] : (opt.description || ''))
 function permRow(s, opt, currentValue) {
   const isCur = opt.value === currentValue
   const row = el('div', 'sheet-row' + (isCur ? ' sel' : ''))
   const mid = el('div'); mid.style.minWidth = '0'; mid.style.flex = '1'
-  mid.appendChild(el('div', 'r-name', opt.name))
-  if (opt.description) mid.appendChild(el('div', 'r-desc', opt.description))
+  mid.appendChild(el('div', 'r-name', permLabel(opt.value)))
+  const dsc = permDesc(opt)
+  if (dsc) mid.appendChild(el('div', 'r-desc', dsc))
   row.appendChild(mid)
   if (isCur) row.appendChild(el('span', 'check', '✓'))
   row.onclick = () => { if (!isCur) applyPermission(s, opt) }
@@ -2630,6 +2751,13 @@ function buildShell() {
     <div class="sheet" role="dialog" aria-label="会话设置">
       <div class="grabber"></div>
       <div class="sheet-scroll" id="sheet-content"></div>
+      <div class="sheet-sub" id="sheet-sub" aria-hidden="true">
+        <div class="sub-head">
+          <button class="sub-back" id="sub-back" type="button" aria-label="返回菜单">‹ 返回</button>
+          <span class="sub-title" id="sub-title"></span>
+        </div>
+        <div class="sheet-scroll sub-body" id="sub-body"></div>
+      </div>
     </div>
   </div>
   <div class="sheet-overlay" id="think-overlay" aria-hidden="true">
@@ -2655,7 +2783,7 @@ function buildShell() {
     </div>
   </div>
   <div class="sheet-overlay" id="q-ov" aria-hidden="true">
-    <div class="sheet q-sheet" role="dialog" aria-label="排队消息管理">
+    <div class="sheet q-sheet" id="q-sheet" role="dialog" aria-label="排队消息管理">
       <div class="grabber"></div>
       <div class="act-row" id="q-a-edit"><span class="ic">✏️</span>编辑内容<span class="sub">修改这段排队的文本</span></div>
       <div class="act-row" id="q-a-steer"><span class="ic">⚡</span>立即插话<span class="sub">不等本轮结束，马上生效</span></div>
@@ -2761,6 +2889,9 @@ function buildShell() {
     sheet.addEventListener('touchend', finish)
     sheet.addEventListener('touchcancel', finish)
   })()
+  // ⋯ 菜单二级面板：返回按钮
+  const subBack = $('#sub-back')
+  if (subBack) subBack.onclick = () => { vibrate(8); closeSubPanel() }
   // 深浅色主题：初始化 + 切换（localStorage 持久化，不跟随系统以免覆盖用户选择）
   initTheme()
   $('#theme-toggle').onclick = () => { toggleTheme(); vibrate(8) }
@@ -2894,6 +3025,11 @@ function buildShell() {
     sendMoved = false; sendLpFired = false
     cancelLp()
     sendLpTimer = setTimeout(() => {
+      // 空输入：doSend 本就空跑，不再震动/提示，避免「说要发却没发」的误导（验证 F3）
+      if (!input.textContent.trim() && !pendingImages.length) { sendLpFired = false; return }
+      // 反向只在运行中有意义：空闲时 queue/steer 无差别，按普通发送处理、无提示（验证 F2）
+      const s = S.current ? sess(S.current) : null
+      if (!s || !s.running) { sendLpFired = true; doSend(null); return }
       sendLpFired = true
       vibrate([30, 40, 30])
       const inv = busyEnter() === 'steer' ? 'queue' : 'steer'

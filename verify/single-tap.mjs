@@ -1,15 +1,18 @@
-/* 单次点击发送验证 · headless Chrome + 合成触摸事件
+/* 单次点击发送验证 · 修复前后对比（headless Chrome + 合成触摸事件）
  *
  * 验证目标（v1.0.6 修复）：键盘弹起时点发送，iOS 收键盘导致按钮位移、浏览器把随后的
  * 合成 click 判定为「点到了别处」而丢弃 —— 表现是第一次点白点、要点两次。
- * 修法：touchend 即执行发送并吞掉合成 click；鼠标/键盘仍走 click。
+ * 修法：touchend 即执行发送并吞掉合成 click；鼠标/键盘仍走 click（500ms 守卫防重复）。
+ *
+ * 与 run-test.mjs 的分工：run-test 用 Input.dispatchTouchEvent（真实输入，浏览器会正常
+ * 补 click），覆盖长按/滑动/降级等；本脚本用 dispatchEvent 构造「click 被吞」的 iOS 键盘
+ * 场景 —— 只有合成事件能模拟浏览器丢弃 click，这是本修复的核心回归点。
  *
  * 方法：同一 stub 宿主（server.mjs）分别服务两套页面——
  *   OLD = 修复前（git: 9c28bd8^ 即 v1.0.5）  NEW = 修复后（当前工作区 web/）
- * 用 CDP 驱动 headless Chrome 起真实页面，dispatchEvent 合成 touch/click，
  * 判据是 stub 端 /__log 里真实记录的 session/prompt RPC（不碰任何真实会话）。
  *
- * 场景矩阵：
+ * 场景矩阵（期望）：
  *   s1  单击·合成 click 被吞（iOS 键盘场景）   OLD: 0(BUG)  NEW: 1 ✅
  *   s2  单击·浏览器正常补 click               OLD: 1      NEW: 1（不重复）
  *   s3  纯鼠标 click                          OLD: 1      NEW: 1
@@ -26,6 +29,8 @@
  */
 import { spawn, spawnSync } from 'node:child_process'
 import fs from 'node:fs'
+import net from 'node:net'
+import crypto from 'node:crypto'
 import path from 'node:path'
 import os from 'node:os'
 import { fileURLToPath } from 'node:url'
@@ -35,6 +40,9 @@ const CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
 const OLD_REF = '9c28bd8^' // 修复前最后一个提交（v1.0.5）
 const TMP = path.join(os.tmpdir(), 'dsh-verify-oldroot')
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+let STAGE = 'boot'
+const trace = (s) => { STAGE = s; console.error('[trace] ' + s) }
+setTimeout(() => { console.error('WATCHDOG: 卡在阶段 ' + STAGE); process.exit(2) }, 120_000).unref()
 
 /* ---------- 1. 提取修复前版本 ---------- */
 function extractOld() {
@@ -58,12 +66,11 @@ function extractOld() {
 /* ---------- 2. stub 宿主 ---------- */
 async function startStub(dir, portHint) {
   for (let port = portHint; port < portHint + 6; port++) {
-    const p = spawn('node', ['server.mjs', String(port)], { cwd: dir, stdio: ['ignore', 'pipe', 'pipe'] })
+    const p = spawn(process.execPath, ['server.mjs', String(port)], { cwd: dir, stdio: ['ignore', 'pipe', 'pipe'] })
     const ok = await new Promise((res) => {
       let buf = ''
       const t = setTimeout(() => res(false), 3000)
-      p.stdout.on('data', (d) => { buf += d; if (buf.includes('stub-host ready')) { clearTimeout(t); res(true) } })
-      p.stderr.on('data', (d) => { buf += d })
+      p.stdout.on('data', (d) => { buf += d; const m = buf.match(/(stub-host ready|READY) ?(\d+)?/); if (m && (m[2] === undefined || +m[2] === port)) { clearTimeout(t); res(true) } })
       p.on('exit', () => { clearTimeout(t); res(false) })
     })
     if (ok) return { proc: p, port }
@@ -72,76 +79,108 @@ async function startStub(dir, portHint) {
   throw new Error('stub 宿主启动失败：无可用端口')
 }
 
-/* ---------- 3. headless Chrome (CDP) ---------- */
-async function startChrome() {
-  const profile = path.join(os.tmpdir(), 'dsh-verify-profile-' + Date.now())
-  const proc = spawn(CHROME, [
-    '--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check',
-    '--mute-audio', '--window-size=390,844',
-    `--user-data-dir=${profile}`, '--remote-debugging-port=0', 'about:blank',
-  ], { stdio: ['ignore', 'ignore', 'pipe'] })
-  const ws = await new Promise((res, rej) => {
-    let buf = ''
-    const t = setTimeout(() => rej(new Error('Chrome DevTools 端口解析超时')), 15000)
-    proc.stderr.on('data', (d) => {
-      buf += d
-      const m = buf.match(/DevTools listening on (ws:\/\/\S+)/)
-      if (m) { clearTimeout(t); res(m[1]) }
+/* ---------- 3. CDP 客户端（手写 RFC6455：undici 的 WebSocket 连 page 级目标会被 Chrome 掐断，
+       必须走 browser 端点 + Target.attachToTarget flatten） ---------- */
+class RawCdp {
+  static async connect(wsUrl) {
+    const u = new URL(wsUrl)
+    const key = crypto.randomBytes(16).toString('base64')
+    const self = new RawCdp()
+    self.pending = new Map()
+    self.msgId = 0
+    self.buf = Buffer.alloc(0)
+    self.fragments = []
+    self.sock = net.connect(Number(u.port), '127.0.0.1')
+    await new Promise((r, j) => { self.sock.once('connect', r); self.sock.once('error', j) })
+    // data 监听必须先挂再写：握手回调 _hs 由 _onData 触发，晚挂会死锁
+    self.sock.on('data', (d) => self._onData(d))
+    self.sock.write(`GET ${u.pathname}${u.search} HTTP/1.1\r\nHost: 127.0.0.1:${u.port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: ${key}\r\nSec-WebSocket-Version: 13\r\n\r\n`)
+    await new Promise((r, j) => {
+      const t = setTimeout(() => j(new Error('ws 握手超时')), 5000)
+      self._hs = () => { clearTimeout(t); r() }
+      self.sock.on('error', j)
     })
-    proc.on('exit', () => rej(new Error('Chrome 提前退出')))
-  })
-  const browserHttp = ws.replace(/ws:\/\//, 'http://').replace(/\/devtools\/browser\/.*$/, '')
-  const page = (await (await fetch(browserHttp + '/json/list')).json()).find((t) => t.type === 'page')
-  return { proc, pageWs: page.webSocketDebuggerUrl }
-}
-
-function cdpConnect(url) {
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(url)
-    const pending = new Map()
-    const waiters = []
-    let nextId = 0
-    ws.onopen = () => resolve({
-      send(method, params = {}) {
-        return new Promise((res, rej) => {
-          const id = ++nextId
-          pending.set(id, { res, rej })
-          ws.send(JSON.stringify({ id, method, params }))
-        })
-      },
-      waitEvent(method, timeout = 20000) {
-        return new Promise((res, rej) => {
-          const w = { method, res, timer: setTimeout(() => rej(new Error('等待事件超时: ' + method)), timeout) }
-          waiters.push(w)
-        })
-      },
-      close: () => ws.close(),
-    })
-    ws.onerror = () => reject(new Error('CDP WebSocket 连接失败'))
-    ws.onmessage = (ev) => {
-      const m = JSON.parse(ev.data)
-      if (m.id && pending.has(m.id)) {
-        const p = pending.get(m.id); pending.delete(m.id)
-        m.error ? p.rej(new Error(m.error.message)) : p.res(m.result)
-      } else if (m.method) {
-        for (let i = waiters.length - 1; i >= 0; i--) {
-          if (waiters[i].method === m.method) {
-            const w = waiters[i]; clearTimeout(w.timer); waiters.splice(i, 1); w.res(m.params)
-          }
-        }
+    return self
+  }
+  _onData(d) {
+    this.buf = Buffer.concat([this.buf, d])
+    if (this._hs) {
+      const idx = this.buf.indexOf('\r\n\r\n')
+      if (idx < 0) return
+      if (!this.buf.subarray(0, idx).toString().includes('101')) throw new Error('ws 握手失败')
+      this.buf = this.buf.subarray(idx + 4)
+      const cb = this._hs; this._hs = null; cb()
+    }
+    for (;;) {
+      const b = this.buf
+      if (b.length < 2) break
+      const fin = !!(b[0] & 0x80), opcode = b[0] & 0x0f, masked = !!(b[1] & 0x80)
+      let len = b[1] & 0x7f, off = 2
+      if (len === 126) { if (b.length < 4) break; len = b.readUInt16BE(2); off = 4 }
+      else if (len === 127) { if (b.length < 10) break; len = Number(b.readBigUInt64BE(2)); off = 10 }
+      let mask = null
+      if (masked) { if (b.length < off + 4) break; mask = b.subarray(off, off + 4); off += 4 }
+      if (b.length < off + len) break
+      const payload = Buffer.from(b.subarray(off, off + len))
+      if (mask) for (let i = 0; i < payload.length; i++) payload[i] ^= mask[i & 3]
+      this.buf = b.subarray(off + len)
+      if (opcode === 8) { try { this.sock.end() } catch (e) {} return }
+      if (opcode === 9) { this.sock.write(Buffer.from([0x8a, 0x80, 0, 0, 0, 0])); continue }
+      if (opcode === 0 || opcode === 1) {
+        this.fragments.push(payload)
+        if (!fin) continue
+        const full = Buffer.concat(this.fragments); this.fragments = []
+        let m
+        try { m = JSON.parse(full.toString()) } catch (e) { continue }
+        if (m.id && this.pending.has(m.id)) { const { resolve, reject } = this.pending.get(m.id); this.pending.delete(m.id); m.error ? reject(new Error(m.error.message + ' @' + m.method)) : resolve(m.result) }
       }
     }
-  })
+  }
+  call(method, params = {}, sessionId) {
+    return new Promise((resolve, reject) => {
+      const id = ++this.msgId
+      this.pending.set(id, { resolve, reject })
+      const msg = JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) })
+      const p = Buffer.from(msg), mask = crypto.randomBytes(4)
+      let out
+      if (p.length < 126) { out = Buffer.alloc(2 + 4 + p.length); out[0] = 0x81; out[1] = 0x80 | p.length; mask.copy(out, 2); for (let i = 0; i < p.length; i++) out[6 + i] = p[i] ^ mask[i & 3] }
+      else { out = Buffer.alloc(4 + 4 + p.length); out[0] = 0x81; out[1] = 0x80 | 126; out.writeUInt16BE(p.length, 2); mask.copy(out, 4); for (let i = 0; i < p.length; i++) out[8 + i] = p[i] ^ mask[i & 3] }
+      this.sock.write(out)
+      setTimeout(() => { if (this.pending.has(id)) { this.pending.delete(id); reject(new Error('CDP 超时: ' + method)) } }, 15_000).unref()
+    })
+  }
 }
 
-/* ---------- 4. 页面脚手架 ---------- */
+async function startChrome() {
+  const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'dshm-tap-verify-'))
+  const proc = spawn(CHROME, [
+    '--headless=new', '--remote-debugging-port=0', `--user-data-dir=${profile}`,
+    '--no-first-run', '--no-default-browser-check', '--disable-gpu', '--hide-scrollbars',
+    // 在 DSH 的 seatbelt 沙箱下启动时，Chrome 自己的渲染器沙箱会崩（Inspector.targetCrashed），
+    // 必须关掉 Chrome 内部沙箱才能驱动页面
+    '--no-sandbox',
+    '--window-size=390,844', 'about:blank',
+  ], { stdio: ['ignore', 'pipe', 'pipe'] })
+  const devtoolsPort = await new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error('Chrome 启动超时')), 15000)
+    const on = (d) => { const m = String(d).match(/DevTools listening on ws:\/\/127\.0\.0\.1:(\d+)/); if (m) { clearTimeout(t); resolve(Number(m[1])) } }
+    proc.stderr.on('data', on); proc.stdout.on('data', on)
+    proc.on('exit', () => { clearTimeout(t); reject(new Error('Chrome 提前退出')) })
+  })
+  return { proc, devtoolsPort, profile }
+}
+
+/* ---------- 4. 页面脚手架（合成事件注入） ----------
+   注意：app.js 整体包在 (function(){'use strict' …})() 里，S/sendPrompt/toast 全是闭包变量，
+   从 Runtime.evaluate 摸不到 —— 只能走 DOM/事件层：改输入、派发触摸/点击、读 #toast/#conn-pill。
+   发送是否发生以 stub 端 /__log 的真实 RPC 记录为准。 */
 const HARNESS = `(() => {
-  window.__spies = { vibrate: [], toast: [] }
+  window.__spies = { vibrate: [] }
   window.__attachClicks = 0
   navigator.vibrate = (p) => { __spies.vibrate.push(JSON.stringify(p)); return true }
-  window.toast = (t) => { __spies.toast.push(String(t)) }
   const ai = document.querySelector('#attach-input')
   ai.click = function () { window.__attachClicks++ }
+  window.__toast = () => { const t = document.querySelector('#toast'); return t ? { text: t.textContent, show: t.classList.contains('show') } : { text: '', show: false } }
   window.__t = (sel, type, dx, dy) => {
     const el = document.querySelector(sel); const r = el.getBoundingClientRect()
     const x = r.x + r.width / 2 + (dx || 0), y = r.y + r.height / 2 + (dy || 0)
@@ -159,40 +198,50 @@ const HARNESS = `(() => {
 })()`
 
 async function openPage(cdp, url) {
-  const w = cdp.waitEvent('Page.loadEventFired')
-  await cdp.send('Page.navigate', { url })
-  await w
-  // 等 app.js 完成引导：S 出现 + 输入区就绪
-  for (let i = 0; i < 60; i++) {
-    const r = await cdp.send('Runtime.evaluate', { expression: `typeof S !== 'undefined' && !!(document.querySelector('#send-btn') && document.querySelector('#chat-input'))`, returnByValue: true })
-    if (r.result.value === true) break
-    await sleep(100)
+  trace('openPage: ' + url)
+  // 先 about:blank 再显式 navigate：直接带 URL 建目标会在导航提交瞬间拆掉 flat 会话
+  const { targetId } = await cdp.call('Target.createTarget', { url: 'about:blank' })
+  const { sessionId } = await cdp.call('Target.attachToTarget', { targetId, flatten: true })
+  await cdp.call('Page.enable', {}, sessionId)
+  await cdp.call('Runtime.enable', {}, sessionId)
+  await cdp.call('Page.navigate', { url }, sessionId)
+  const ev = async (expression) => {
+    const r = await cdp.call('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true }, sessionId)
+    if (r.exceptionDetails) throw new Error('page eval failed: ' + JSON.stringify(r.exceptionDetails.exception?.description || r.exceptionDetails.text).slice(0, 300))
+    return r.result?.value
   }
-  await sleep(600) // ws 握手
-  // connState 就绪（超时则强制 online —— 发送 RPC 走 fetch，不依赖 ws）
-  let forced = false
-  for (let i = 0; i < 30; i++) {
-    const r = await cdp.send('Runtime.evaluate', { expression: `S.connState`, returnByValue: true })
-    if (r.result.value === 'online') break
-    if (i === 29) { await cdp.send('Runtime.evaluate', { expression: `S.connState = 'online'` }); forced = true }
-    await sleep(100)
+  // 等应用引导完成（输入区就绪）
+  for (let i = 0; i < 80; i++) {
+    const ok = await ev(`!!(document.querySelector('#send-btn') && document.querySelector('#chat-input'))`).catch(() => false)
+    if (ok) break
+    await sleep(150)
   }
-  const v = await cdp.send('Runtime.evaluate', { expression: `(document.querySelector('script[src*="app.js"]')||{src:''}).src.match(/v=([\\d.]+)/)[1]`, returnByValue: true })
-  const h = await cdp.send('Runtime.evaluate', { expression: HARNESS, returnByValue: true, awaitPromise: false })
-  if (h.result.value !== 'harness-ok') throw new Error('harness 注入失败')
-  const cur = await cdp.send('Runtime.evaluate', { expression: `S.current`, returnByValue: true })
-  return { version: v.result.value, forced, current: cur.result.value }
+  // ws 在线（conn-pill 文案「已连接」；闭包内的 S.connState 摸不到）
+  let online = false
+  for (let i = 0; i < 50; i++) {
+    online = await ev(`(()=>{const p=document.querySelector('#conn-pill');return !!(p && !p.classList.contains('off') && p.querySelector('span:last-child').textContent==='已连接')})()`).catch(() => false)
+    if (online) break
+    await sleep(150)
+  }
+  if (!online) throw new Error('conn-pill 一直未到「已连接」：stub mux 未握手成功，中止以免误判')
+  // 会话打开（URL 自带 #/s/s-test → chat 视图激活）
+  let chatActive = false
+  for (let i = 0; i < 50; i++) {
+    chatActive = await ev(`document.querySelector('#view-chat').classList.contains('active')`).catch(() => false)
+    if (chatActive) break
+    await sleep(150)
+  }
+  const version = await ev(`(document.querySelector('script[src*="app.js"]')||{src:''}).src.match(/v=([\\d.]+)/)[1]`)
+  const h = await ev(HARNESS)
+  if (h !== 'harness-ok') throw new Error('harness 注入失败')
+  return { ev, sessionId, targetId, version, online, chatActive }
 }
 
 /* ---------- 5. 场景矩阵 ---------- */
 async function runMatrix(t) {
   const ctl = (o) => fetch(`http://127.0.0.1:${t.port}/__ctl`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(o) }).then((r) => r.json())
   const logPrompts = async () => (await (await fetch(`http://127.0.0.1:${t.port}/__log`)).json()).prompts || []
-  const ev = async (expr) => {
-    const r = await t.cdp.send('Runtime.evaluate', { expression: expr, returnByValue: true, awaitPromise: true })
-    if (r.exceptionDetails) throw new Error('页面执行异常: ' + JSON.stringify(r.exceptionDetails).slice(0, 300))
-    return r.result.value
-  }
+  const ev = t.ev
   const rows = []
   const push = (id, desc, extra) => rows.push({ id, desc, ...extra })
 
@@ -209,9 +258,9 @@ async function runMatrix(t) {
   p = (await logPrompts()).filter((x) => x.text === 'S2')
   push('s2', '单击·浏览器正常补 click', { count: p.length, mode: p[0] && p[0].mode, inputCleared: inputAfter === '' })
 
-  // s3 纯鼠标 click（桌面路径）
+  // s3 纯鼠标 click（桌面路径）——先等 >500ms，避开 s2 touchend 的防重复守卫窗口
   await ctl({ reset: true })
-  inputAfter = await ev(`(async()=>{ __set('S3'); __c('#send-btn'); await new Promise(r=>setTimeout(r,250)); return __get() })()`)
+  inputAfter = await ev(`(async()=>{ await new Promise(r=>setTimeout(r,600)); __set('S3'); __c('#send-btn'); await new Promise(r=>setTimeout(r,250)); return __get() })()`)
   p = (await logPrompts()).filter((x) => x.text === 'S3')
   push('s3', '纯鼠标 click', { count: p.length, mode: p[0] && p[0].mode })
 
@@ -223,21 +272,21 @@ async function runMatrix(t) {
 
   // s5 运行中长按 420ms → 本次插话（steer）
   await ctl({ reset: true, running: true })
-  await sleep(150)
+  await sleep(250)
   await ev(`__set('S5'); __t('#send-btn','touchstart')`)
   await sleep(560)
-  const s5detail = await ev(`(async()=>{ __t('#send-btn','touchend'); await new Promise(r=>setTimeout(r,250)); return JSON.stringify({ input: __get(), toasts: __spies.toast.slice(), vibes: __spies.vibrate.slice() }) })()`)
+  const s5detail = await ev(`(async()=>{ __t('#send-btn','touchend'); await new Promise(r=>setTimeout(r,250)); return JSON.stringify({ input: __get(), toast: __toast(), vibes: __spies.vibrate.slice() }) })()`)
   p = (await logPrompts()).filter((x) => x.text === 'S5')
   const d5 = JSON.parse(s5detail)
   await ctl({ running: false })
   push('s5', '运行中长按 420ms（本次插话）', {
     count: p.length, mode: p[0] && p[0].mode,
-    toastOk: d5.toasts.some((s) => s.includes('插话')), vibeOk: d5.vibes.includes('[30,40,30]'),
+    toastOk: !!(d5.toast && d5.toast.show && d5.toast.text.includes('插话')), vibeOk: d5.vibes.includes('[30,40,30]'),
   })
 
   // s5b 运行中短按 → 默认排队（queue）
   await ctl({ reset: true, running: true })
-  await sleep(150)
+  await sleep(250)
   await ev(`(async()=>{ __set('S5b'); __t('#send-btn','touchstart'); __t('#send-btn','touchend'); __c('#send-btn'); await new Promise(r=>setTimeout(r,250)); return 1 })()`)
   p = (await logPrompts()).filter((x) => x.text === 'S5b')
   await ctl({ running: false })
@@ -245,8 +294,8 @@ async function runMatrix(t) {
 
   // s6 图片按钮·click 被吞
   await ctl({ reset: true })
-  await ev(`(async()=>{ __attachClicks = 0; __t('#attach-btn','touchstart'); __t('#attach-btn','touchend'); await new Promise(r=>setTimeout(r,150)); return __attachClicks })()`).then((v) => { globalThis.__s6 = v })
-  push('s6', '图片按钮·click 被吞', { count: globalThis.__s6 })
+  const a6 = await ev(`(async()=>{ __attachClicks = 0; __t('#attach-btn','touchstart'); __t('#attach-btn','touchend'); await new Promise(r=>setTimeout(r,150)); return __attachClicks })()`)
+  push('s6', '图片按钮·click 被吞', { count: a6 })
 
   // s7 图片按钮·正常补 click（不重复）
   await ctl({ reset: true })
@@ -296,27 +345,34 @@ async function main() {
   const stubNew = await startStub(path.join(REPO, 'verify'), 8627)
   console.log(`stub 宿主：OLD=:${stubOld.port}  NEW=:${stubNew.port}`)
   const chrome = await startChrome()
-  console.log('headless Chrome 已启动')
-  const cdp = await cdpConnect(chrome.pageWs)
-  await cdp.send('Page.enable')
-  await cdp.send('Runtime.enable')
+  console.log('headless Chrome 已启动 :' + chrome.devtoolsPort)
+  trace('连接 browser 级 CDP')
+  let ver = null
+  for (let i = 0; i < 50; i++) { try { ver = await (await fetch(`http://127.0.0.1:${chrome.devtoolsPort}/json/version`)).json(); break } catch (e) {} await sleep(150) }
+  if (!ver) throw new Error('/json/version 不可达')
+  const cdp = await RawCdp.connect(ver.webSocketDebuggerUrl)
+  trace('browser 级 CDP 已连接')
 
   const targets = [
-    { key: 'old', name: `修复前 v${oldVer}`, url: `http://127.0.0.1:${stubOld.port}/m/#/s/s-test`, port: stubOld.port, cdp },
-    { key: 'neu', name: '修复后（工作区）', url: `http://127.0.0.1:${stubNew.port}/m/#/s/s-test`, port: stubNew.port, cdp },
+    { key: 'old', name: `修复前 v${oldVer}`, url: `http://127.0.0.1:${stubOld.port}/m/#/s/s-test`, port: stubOld.port },
+    { key: 'neu', name: '修复后（工作区）', url: `http://127.0.0.1:${stubNew.port}/m/#/s/s-test`, port: stubNew.port },
   ]
   const results = {}
   for (const t of targets) {
     const info = await openPage(cdp, t.url)
-    console.log(`\n[${t.name}] 页面 v${info.version} · current=${info.current}${info.forced ? '（connState 强制 online）' : ''}`)
+    Object.assign(t, info)
+    console.log(`\n[${t.name}] 页面 v${info.version} · 在线=${info.online} · 会话页=${info.chatActive}`)
+    trace(`矩阵:${t.key}`)
     results[t.key] = await runMatrix(t)
+    await cdp.call('Target.closeTarget', { targetId: info.targetId }).catch(() => {})
   }
 
   /* 汇总 */
   const rowsOld = Object.fromEntries(results.old.map((r) => [r.id, r]))
   const rowsNeu = Object.fromEntries(results.neu.map((r) => [r.id, r]))
   console.log('\n================ 单次点击发送验证结果 ================')
-  console.log('场景'.padEnd(16) + '修复前 v1.0.5'.padEnd(22) + '修复后（工作区）'.padEnd(22) + '判定')
+  const pad = (s, n) => String(s).padEnd(n)
+  console.log(pad('场景', 18) + pad('修复前 v1.0.5', 26) + pad(`修复后 v${targets[1].version}（工作区）`, 26) + '判定')
   let pass = true, failList = []
   for (const id of ['s1', 's2', 's3', 's4', 's5', 's5b', 's6', 's7', 's8', 's9', 's10']) {
     const o = rowsOld[id], n = rowsNeu[id]
@@ -333,18 +389,17 @@ async function main() {
     const okNeu = n.count === EXPECT.neu[id].count && (!EXPECT.neu[id].mode || n.mode === EXPECT.neu[id].mode)
     const both = okOld && okNeu
     if (!both) { pass = false; failList.push(id) }
-    console.log(
-      (o.desc || id).padEnd(16) + (fmt(o, EXPECT.old[id]) + '').padEnd(22) + (fmt(n, EXPECT.neu[id]) + '').padEnd(22) + (both ? '✅' : '❌'),
-    )
+    console.log(pad(o.desc || id, 18) + pad(fmt(o, EXPECT.old[id]), 26) + pad(fmt(n, EXPECT.neu[id]), 26) + (both ? '✅' : '❌'))
   }
   const b = rowsNeu.s1.bubble
-  console.log(`\n核心场景 s1（iOS 键盘下第一次点）：修复前 0 次（要点两次）→ 修复后 ${rowsNeu.s1.count} 次${b ? ' + 气泡乐观上屏' : '（气泡未上屏 ⚠️）'}`)
+  console.log(`\n核心场景 s1（iOS 键盘下第一次点）：修复前 ${rowsOld.s1.count} 次（要点两次）→ 修复后 ${rowsNeu.s1.count} 次${b ? ' + 气泡乐观上屏' : '（气泡未上屏 ⚠️）'}`)
   console.log(pass ? '\n全部场景符合预期 ✅' : `\n不符合预期的场景：${failList.join(', ')} ❌`)
 
-  cdp.close(); try { chrome.proc.kill() } catch (e) {}
+  try { chrome.proc.kill() } catch (e) {}
   try { stubOld.proc.kill() } catch (e) {}
   try { stubNew.proc.kill() } catch (e) {}
+  try { fs.rmSync(chrome.profile, { recursive: true, force: true }) } catch (e) {}
   process.exit(pass ? 0 : 1)
 }
 
-main().catch((e) => { console.error('验证脚本失败：', e.message); process.exit(2) })
+main().catch((e) => { console.error('验证脚本失败：', e.stack || e.message); process.exit(2) })

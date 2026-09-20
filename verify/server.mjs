@@ -16,8 +16,10 @@ import { fileURLToPath } from 'node:url'
 const PORT = Number(process.argv[2] || 8617)
 const WEB = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'web')
 const SID = 's-test'
-const state = { running: false, rejectSteer: false, prompts: [] }
+const state = { running: false, rejectSteer: false, offline: false, prompts: [] }
 const eventsSockets = new Set() // 已 open $events 的 ws（用于主动推 api-session/status）
+const controlSockets = new Map() // ws → control streamId（用于主动推 queue 帧）
+const allSockets = new Set() // 全部存活的 ws（offline 时统一摧毁）
 
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.png': 'image/png', '.svg': 'image/svg+xml', '.webmanifest': 'application/manifest+json' }
 
@@ -40,6 +42,8 @@ function api(endpoint, args) {
         throw new Error('session is not accepting steer requests right now')
       }
       state.prompts.push({ t: Date.now(), mode, text })
+      // 运行中排队：复刻宿主的 control 流 queue 广播（客户端据此渲染输入框上方的排队 chip）
+      if (mode === 'queue' && state.running && text) pushQueue(text)
       return {}
     }
     case 'session/page':
@@ -79,6 +83,7 @@ function handleOpen(sock, m) {
   const sid = m.streamId, ep = m.endpoint
   switch (ep) {
     case 'session/control':
+      controlSockets.set(sock, sid)
       sendItem(sock, sid, { type: 'baseline', value: { queues: {}, projections: {} } })
       break
     case '$events':
@@ -100,10 +105,21 @@ function pushStatus(running) {
     try { sock.write(wsEncode(JSON.stringify({ streamId: sock._eventsStreamId, type: 'item', value: { type: 'emit', event: 'api-session/status', args: [SID, running] } }))) } catch (e) {}
   }
 }
+function pushQueue(text) {
+  const value = { type: 'queue', sessionId: SID, items: [{ placement: 'queued', message: { content: [{ type: 'text', text }], source: {} } }] }
+  for (const [sock, sid] of controlSockets) {
+    try { sock.write(wsEncode(JSON.stringify({ streamId: sid, type: 'item', value }))) } catch (e) {}
+  }
+}
+function goOffline() {
+  state.offline = true
+  for (const sock of allSockets) { try { sock.destroy() } catch (e) {} }
+}
+function goOnline() { state.offline = false }
 
 const server = http.createServer((q, s) => {
   const url = new URL(q.url, 'http://x')
-  if (url.pathname === '/__log') { s.writeHead(200, { 'content-type': 'application/json' }); s.end(JSON.stringify({ running: state.running, rejectSteer: state.rejectSteer, prompts: state.prompts })); return }
+  if (url.pathname === '/__log') { s.writeHead(200, { 'content-type': 'application/json' }); s.end(JSON.stringify({ running: state.running, rejectSteer: state.rejectSteer, offline: state.offline, prompts: state.prompts })); return }
   let body = ''
   q.on('data', (c) => (body += c))
   q.on('end', () => {
@@ -113,9 +129,12 @@ const server = http.createServer((q, s) => {
       if (ctl.reset) state.prompts = []
       if (typeof ctl.rejectSteer === 'boolean') state.rejectSteer = ctl.rejectSteer
       if (typeof ctl.running === 'boolean' && ctl.running !== state.running) { state.running = ctl.running; pushStatus(ctl.running) }
+      if (ctl.offline === true) goOffline()
+      if (ctl.offline === false) goOnline()
       s.writeHead(200, { 'content-type': 'application/json' }); s.end('{"ok":true}'); return
     }
     if (q.method === 'POST' && url.pathname.startsWith('/api/')) {
+      if (state.offline) { s.writeHead(503, { 'content-type': 'application/json' }); s.end('{"result":{"ok":false,"error":{"message":"host offline (test)"}}}'); return }
       const endpoint = url.pathname.slice(5)
       let args = {}
       try { args = (JSON.parse(body).payload || {}).args || {} } catch (e) {}
@@ -141,10 +160,11 @@ const server = http.createServer((q, s) => {
 })
 
 server.on('upgrade', (q, sock) => {
-  if (new URL(q.url, 'http://x').pathname !== '/api/remote.mux') { sock.destroy(); return }
+  if (new URL(q.url, 'http://x').pathname !== '/api/remote.mux' || state.offline) { sock.destroy(); return }
   const key = q.headers['sec-websocket-key']
   sock.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ' + wsAccept(key) + '\r\n\r\n')
   sock.setNoDelay(true)
+  allSockets.add(sock)
   let buf = Buffer.alloc(0)
   sock.on('data', (d) => {
     buf = Buffer.concat([buf, d])
@@ -162,7 +182,7 @@ server.on('upgrade', (q, sock) => {
       else if (m && m.type === 'cancel' && sock._eventsStreamId === m.streamId) { /* keep */ }
     }
   })
-  sock.on('close', () => eventsSockets.delete(sock))
+  sock.on('close', () => { eventsSockets.delete(sock); controlSockets.delete(sock); allSockets.delete(sock) })
   sock.on('error', () => {})
 })
 
