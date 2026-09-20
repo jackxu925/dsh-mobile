@@ -991,7 +991,7 @@ function sessionCard(s, showWs) {
   })
   mkAct('📦', '归档', '#6b7382', async () => {
     vibrate(8)
-    try { await rpc('workspace/archiveSession', { request: { sessionId: s.id } }); S.sessions.delete(s.id); renderList(); toast('已归档（桌面端可恢复）') } catch (e) { toast('归档失败：' + e.message, true) }
+    try { const av = await rpc('workspace/archiveSession', { request: { sessionId: s.id } }); if (av && Array.isArray(av.archivedSessionIds)) S.archived = new Set(av.archivedSessionIds); S.sessions.delete(s.id); renderList(); toast('已归档（桌面端可恢复）') } catch (e) { toast('归档失败：' + e.message, true) }
   })
   wrap.append(actions, card)
   initSwipe(wrap, card, actions)
@@ -1106,7 +1106,8 @@ function openSessionMenu(sid, x, y, expandRename) {
   wire('#sess-a-archive', async () => {
     vibrate(8)
     try {
-      await rpc('workspace/archiveSession', { request: { sessionId: sid } })
+      const av = await rpc('workspace/archiveSession', { request: { sessionId: sid } })
+      if (av && Array.isArray(av.archivedSessionIds)) S.archived = new Set(av.archivedSessionIds)
       S.sessions.delete(sid)
       closeSessionMenu()
       renderList()
@@ -1197,7 +1198,8 @@ async function loadBase() {
       s.agentPreset = item.agentPreset || null
       applyListValues(s, item.projections && item.projections.values)
     }
-    deriveWorkspaces()
+    // workspace/follow 已提供权威分组（含真实标题/顺序/归档）；仅在还没有时退回 cwd 推导
+    if (!S.workspaces.length) deriveWorkspaces()
     setConn('online')
     renderList()
   } catch (e) {
@@ -1314,6 +1316,7 @@ const Mux = {
   openAll() {
     this.open('control', 'session/control', {})
     this.open('events', '$events', {})
+    this.open('workspace', 'workspace/follow', {})
     if (this.followId) this.open('follow', 'session/follow', { request: { address: followAddress(this.followId), assistantStream: true } }, { sessionId: this.followId })
   },
   /* 切换/重开 follow 流；force=true 时即使目标相同也重开（重取 snapshot） */
@@ -1363,6 +1366,30 @@ function applyProjection(s, values) {
   if (values.imageLimits) s.imageLimits = values.imageLimits
   applyStats(s, values)
 }
+/* ---- workspace 流：归档集合 + 真实工作区分组（修「归档后列表不消失」） ---- */
+Mux.handlers.workspace = (v) => {
+  if (v.type === 'baseline') {
+    const val = v.value || v
+    S.archived = new Set(val.archivedSessionIds || [])
+    if (Array.isArray(val.items) && val.items.length) {
+      S.workspaces = val.items
+    }
+    renderListSoon()
+  } else if (v.type === 'archived') {
+    S.archived = new Set(v.archivedSessionIds || [])
+    renderListSoon()
+  } else if (v.type === 'upsert' && v.workspace) {
+    const i = S.workspaces.findIndex((w) => w.workspaceId === v.workspace.workspaceId)
+    if (i >= 0) S.workspaces[i] = v.workspace; else S.workspaces.push(v.workspace)
+    renderListSoon()
+  } else if (v.type === 'remove') {
+    S.workspaces = S.workspaces.filter((w) => w.workspaceId !== v.workspaceId)
+    renderListSoon()
+  } else if (v.type === 'order' && Array.isArray(v.workspaceIds)) {
+    S.workspaces.sort((a, b) => v.workspaceIds.indexOf(a.workspaceId) - v.workspaceIds.indexOf(b.workspaceId))
+    renderListSoon()
+  }
+}
 /* ---- control 流：全局队列与投影 ---- */
 Mux.handlers.control = (v) => {
   if (v.type === 'baseline') {
@@ -1405,7 +1432,7 @@ Mux.handlers.events = (v) => {
         s.blank = !!sum.blank; s.cwd = sum.cwd || ''; s.agentPreset = sum.agentPreset || null
         s.updatedAt = sum.updatedAt || Date.now()
         if (sum.projections && sum.projections.values) applyListValues(s, sum.projections.values)
-        deriveWorkspaces()
+        if (!S.workspaces.length) deriveWorkspaces()
         renderListSoon()
         break
       }
@@ -1413,7 +1440,7 @@ Mux.handlers.events = (v) => {
         const id = a[0]
         const wasCurrent = S.current === id
         S.sessions.delete(id)
-        deriveWorkspaces()
+        if (!S.workspaces.length) deriveWorkspaces()
         renderList()
         if (wasCurrent) {
           // 正在看的会话被（其它端）删除：提示并退回列表，避免留下僵尸聊天页
