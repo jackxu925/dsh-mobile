@@ -582,7 +582,7 @@ function toolNode(item) {
   tq.type = 'button'
   tq.setAttribute('aria-label', '引用这次调用（命令+输出）')
   tq.innerHTML = ICONS.quote
-  tq.onclick = (e) => { e.stopPropagation(); addQuote(S.current, '工具·' + (item.name || '调用'), toolQuoteText(item)) }
+  tq.onclick = (e) => { e.stopPropagation(); quoteNow(S.current, '工具·' + (item.name || '调用'), toolQuoteText(item)) }
   head.appendChild(tq)
   head.append(state, chev)
   const body = el('div', 'tool-body')
@@ -882,10 +882,17 @@ const quoteDrafts = new Map()   // sessionId → [{label, text, note}]
 const quotesOf = (sid) => { if (!quoteDrafts.has(sid)) quoteDrafts.set(sid, []); return quoteDrafts.get(sid) }
 function addQuote(sid, label, text) {
   const arr = quotesOf(sid)
-  if (arr.length >= 6) { toast('最多同时引用 6 条', true); return }
+  if (arr.length >= 6) { toast('最多同时引用 6 条', true); return -1 }
   arr.push({ label, text: String(text || '').trim(), note: '' })
   vibrate(8)
   renderQuoteStrip()
+  return arr.length - 1
+}
+/* ❝ 一键引用：加 chip 后立刻打开注解面板（用户点引用就是想写注解，不该再点一次 chip）。
+   必须在同一个用户手势里同步 focus，否则 iOS 不弹键盘。 */
+function quoteNow(sid, label, text) {
+  const i = addQuote(sid, label, text)
+  if (i >= 0) openQuoteSheet(sid, i)
 }
 /* 工具调用的引用全文：命令 + 输出（超长截断） */
 function toolQuoteText(item) {
@@ -921,7 +928,13 @@ function parseQuotedMessage(text) {
     i++
     while (i < lines.length && lines[i].startsWith('> ') && !/^> \[/.test(lines[i])) { t += '\n' + lines[i].slice(2); i++ }
     const q = { label, text: t, note: '' }
-    if (i < lines.length && lines[i].indexOf('【注】') === 0) { q.note = lines[i].slice(3); i++ }
+    // 【注】可以多行：读到空行或下一条引用为止（注解里的换行必须还原，否则尾巴会漏进正文）
+    if (i < lines.length && lines[i].indexOf('【注】') === 0) {
+      const nl = [lines[i].slice(3)]
+      i++
+      while (i < lines.length && lines[i] !== '' && !lines[i].startsWith('> [')) { nl.push(lines[i]); i++ }
+      q.note = nl.join('\n')
+    }
     quotes.push(q)
   }
   const body = lines.slice(i).join('\n').replace(/^\n+/, '')
@@ -964,14 +977,16 @@ function openQuoteSheet(sid, i) {
   const note = $('#quote-note')
   note.textContent = q.note || ''
   ovSet('quote-ov', true)
-  // 立刻聚焦输入框并拉起键盘：用户点 chip 就是要写注解，不该再点一次输入框。
-  // 延迟到 sheet 滑入动画完成后再 focus（iOS 对刚打开的 fixed 容器内 focus 有时不拉键盘）
-  setTimeout(() => {
-    try { note.focus({ preventScroll: true }) } catch (e) { note.focus() }
-    // 光标移到末尾
-    const sel = window.getSelection()
-    if (sel) { sel.selectAllChildren(note); sel.collapseToEnd() }
-  }, 320)
+  focusNote(note)
+}
+/* 注解框聚焦：必须在用户手势里同步调用——setTimeout 里的 focus 在 iOS 上不弹键盘（v1.4.6 的 320ms 延迟就是那个 bug） */
+function focusNote(note) {
+  if (!note) return
+  try { note.focus({ preventScroll: true }) } catch (e) { try { note.focus() } catch (e2) {} }
+  const sel = window.getSelection()
+  if (sel && document.activeElement === note) { sel.selectAllChildren(note); sel.collapseToEnd() }  // 光标落末尾
+  // 兜底：若首次 focus 没生效，下一帧再试（此时已非手势内，只保证光标在位，键盘靠上面那次同步 focus）
+  if (document.activeElement !== note) requestAnimationFrame(() => { if (document.activeElement !== note) { try { note.focus({ preventScroll: true }) } catch (e) {} } })
 }
 function itemNode(s, item) {
   switch (item.kind) {
@@ -1009,7 +1024,7 @@ function itemNode(s, item) {
         meta.appendChild(cp)
       }
       const uq = metaIcon('quote', '引用这条')
-      uq.onclick = () => addQuote(s.id, '用户', item.text || '[图片]')
+      uq.onclick = () => quoteNow(s.id, '用户', item.text || '[图片]')
       meta.appendChild(uq)
       if (item.failed) {
         const r = el('span', 'retry-send', '发送失败 · 点按重试')
@@ -1033,7 +1048,7 @@ function itemNode(s, item) {
         meta.appendChild(cp)
       }
       const aq = metaIcon('quote', '引用这条回答')
-      aq.onclick = () => addQuote(s.id, '助手', item.text)
+      aq.onclick = () => quoteNow(s.id, '助手', item.text)
       meta.appendChild(aq)
       if (item.reasoning && item.reasoning.trim()) meta.appendChild(thinkDot(() => openThink({ text: item.reasoning, live: false })))
       // 轮级统计 pill（P1 方案）：只挂在轮的最后一条助手消息上（turnStats 由 turn/end 计算）
@@ -1075,7 +1090,7 @@ function itemNode(s, item) {
       sq.type = 'button'
       sq.setAttribute('aria-label', '引用这条系统消息')
       sq.innerHTML = ICONS.quote
-      sq.onclick = () => addQuote(S.current, '系统', item.text)
+      sq.onclick = () => quoteNow(S.current, '系统', item.text)
       d.appendChild(sq)
       return d
     }
@@ -3518,7 +3533,7 @@ function buildShell() {
   $('#quote-close').onclick = () => ovSet('quote-ov', false)
   $('#quote-save').onclick = () => {
     const arr = quotesOf(quoteEdit.sid)
-    if (arr[quoteEdit.i]) arr[quoteEdit.i].note = $('#quote-note').textContent
+    if (arr[quoteEdit.i]) arr[quoteEdit.i].note = editableText($('#quote-note'))  // innerText 读回：注解里的换行不能丢
     ovSet('quote-ov', false)
     renderQuoteStrip()
     vibrate(8)

@@ -614,7 +614,7 @@ html.light .stat-pill { background:rgba(15,23,42,.04); }
 .qt-chip .rm:active { color:var(--red); }
 /* 注解面板 */
 .quote-full { flex:none; margin:4px 16px 0; background:var(--bg-card); border:.5px solid var(--line); border-left:3px solid var(--accent); border-radius:10px; padding:9px 12px; font-size:12px; line-height:1.55; color:var(--text-2); max-height:16vh; overflow-y:auto; white-space:pre-wrap; word-break:break-word; font-family:var(--font); }
-.note-in { flex:1; margin:10px 16px 0; background:var(--bg-card); border:1px solid rgba(59,130,246,.4); border-radius:14px; padding:13px 14px; font-size:15px; line-height:1.6; color:var(--text); min-height:96px; overflow-y:auto; outline:none; -webkit-user-modify:read-write-plaintext-only; transition:border-color .2s; }
+.note-in { flex:1; margin:10px 16px 0; background:var(--bg-card); border:1px solid rgba(59,130,246,.4); border-radius:14px; padding:13px 14px; font-size:15px; line-height:1.6; color:var(--text); min-height:96px; overflow-y:auto; outline:none; white-space:pre-wrap; overflow-wrap:break-word; -webkit-user-modify:read-write-plaintext-only; transition:border-color .2s; }
 .note-in:focus { border-color:var(--accent); }
 .note-in:empty::before { content:attr(data-ph); color:var(--text-3); }
 .qbtns { flex:none; display:flex; gap:9px; margin:12px 16px 4px; }
