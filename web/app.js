@@ -486,6 +486,7 @@ function foldEvent(s, event, view) {
         }
       }
       s.items.push({ kind: 'user', text, images: images.length ? images : null, time: event.time, seq: event.seq, rpcId: rid || null })
+      s._qStale = true   // 「问过的问题」的缓存/计数作废，下次打开重算
       s.lastPreview = text || '[图片]'
       break
     }
@@ -2951,6 +2952,7 @@ function openSubPanel(kind, title, build) {
   sub.setAttribute('aria-hidden', 'false')
 }
 function closeSubPanel() {
+  qPanel = null
   subPanelKind = null
   const sub = $('#sheet-sub')
   if (sub) { sub.classList.remove('in'); sub.setAttribute('aria-hidden', 'true') }
@@ -3121,65 +3123,148 @@ function renderModelPanel(s) {
   }
   for (const f of m.failures || []) body.appendChild(el('div', 'sheet-note', '⚠️ ' + f.name + '：' + f.message))
 }
-/* 后台算全量问题数（首次进会话时触发，结果缓存到 s._qTotal；菜单开着就刷新显示） */
-function countQuestionsSoon(s) {
-  if (s._qCounting) return
-  s._qCounting = true
-  collectAllQuestions(s)
-    .then((list) => { s._qTotal = list.length })
-    .catch(() => { s._qTotal = s.items.filter((i) => i.kind === 'user').length })
-    .finally(() => {
-      s._qCounting = false
-      if (sheetSession === s.id) refreshSheetViews(s)   // 菜单开着 → 就地更新计数
-    })
+/* ---- 问过的问题：先出当前窗口已知的，再逐页往前补（边补边追加，不让人干等） ---- */
+function windowQuestions(s) {
+  const seen = new Set()
+  const out = []
+  for (const it of s.items) {
+    if (!it || it.kind !== 'user') continue
+    const k = it.seq != null ? 's' + it.seq : 't' + it.time
+    if (seen.has(k)) continue
+    seen.add(k)
+    out.push(it)
+  }
+  out.sort((a, b) => (a.time || 0) - (b.time || 0))
+  return out
+}
+/* 累加器：窗口已知 + 已经翻到的更早页（时间正序，旧→新）。面板随时读它渲染。 */
+function qAcc(s) {
+  // 又有新消息进窗口 → 缓存作废重建（扫描进行中先不动，免得把累加器抽掉）
+  if (s._qStale && !s._qScan) { s._qAcc = null; s._qAll = null; s._qTotal = undefined; s._qStale = false }
+  if (!s._qAcc) s._qAcc = windowQuestions(s)
+  return s._qAcc
+}
+/* 后台算全量问题数（首次进会话时触发；面板与菜单共用同一次扫描，结果缓存到 s._qAll / s._qTotal） */
+function countQuestionsSoon(s) { scanQuestions(s) }
+/* 全量扫描：逐页往前翻，每页到达就追加进累加器并通知打开着的面板；完整跑完才缓存为全量 */
+function scanQuestions(s) {
+  if (s._qAll) return Promise.resolve({ list: s._qAll, complete: true })
+  if (s._qScan) return s._qScan
+  const acc = qAcc(s)
+  const seen = new Set(acc.map((it) => (it.seq != null ? 's' + it.seq : 't' + it.time)))
+  s._qScan = (async () => {
+    let through = s.oldestSeq, hasMore = s.hasMore, guard = 0, complete = true
+    while (hasMore && through != null && through > 0 && guard++ < 60) {
+      if (S.current !== s.id) { complete = false; break }   // 用户已经走了，别再烧请求
+      let v = null
+      try { v = await rpc('session/page', { request: { address: followAddress(s.id), throughSeq: through - 1, maxMessages: 200 } }) }
+      catch (e) { complete = false; break }
+      const recs = v.records || []
+      if (!recs.length) break
+      const tmp = { items: [], callArgs: new Map(), live: null, _todoCalls: new Set(), _pendingCalls: [], _thinkBuf: '' }
+      for (const rec of recs) foldEvent(tmp, rec.event || rec)
+      const fresh = []
+      for (const it of tmp.items) {
+        if (!it || it.kind !== 'user') continue
+        const k = it.seq != null ? 's' + it.seq : 't' + it.time
+        if (seen.has(k)) continue
+        seen.add(k)
+        fresh.push(it)
+      }
+      if (fresh.length) {
+        fresh.sort((a, b) => (a.time || 0) - (b.time || 0))
+        s._qAcc = fresh.concat(s._qAcc)
+        qPanelAppend(s, fresh)
+      }
+      const first = recs[0].event || recs[0]
+      if (typeof first.seq === 'number') through = first.seq
+      hasMore = !!v.hasMore
+    }
+    if (complete) s._qAll = s._qAcc
+    s._qTotal = s._qAcc.length
+    qPanelDone(s, complete)
+    // 菜单里的计数就地更新；但面板开着时别重渲染（会把用户滚到的位置顶回顶部）
+    if (sheetSession === s.id && subPanelKind !== 'questions') refreshSheetViews(s)
+    return { list: s._qAcc, complete }
+  })().finally(() => { s._qScan = null })
+  return s._qScan
 }
 /* ---- 问过的问题面板：最新在上，点击关闭并定位到时间线 ---- */
+let qPanel = null   // 打开着的面板（增量追加 / 收尾改文案用）
 function openQuestionsPanel(s) {
   openSubPanel('questions', '问过的问题', () => renderQuestionsPanel(s))
 }
-async function renderQuestionsPanel(s) {
+function mkQRow(s, it, numEl) {
+  const row = el('button', 'qrow')
+  row.type = 'button'
+  const no = el('span', 'qi', numEl)
+  const txt = el('span', 'qt', it.text || '[图片]')
+  // 日期 + 时间：跨天/跨年的问题也能一眼分辨
+  const tm = el('span', 'qm', fmtTime(it.time))   // fmtTime 自带 今天/昨天/M月D日/[年份] 分层
+  row.append(no, txt, tm)
+  row.onclick = () => { vibrate(8); closeSheet(); jumpToItem(s, it) }
+  return { row, no }
+}
+function renderQuestionsPanel(s) {
   const body = $('#sub-body')
   if (!body) return
+  qPanel = null
   body.textContent = ''
-  body.appendChild(el('div', 'sheet-note', '正在翻全部历史…'))
-  const users = await collectAllQuestions(s).catch(() => s.items.filter((i) => i.kind === 'user'))
-  if (S.current !== s.id || subPanelKind !== 'questions') return   // 用户已离开
-  body.textContent = ''
-  s._qTotal = users.length   // 面板打开过就顺手缓存
-  if (!users.length) { body.appendChild(el('div', 'sheet-note', '这个对话里还没有你发过的消息')); return }
-  const newest = users.slice().reverse()
-  newest.forEach((it, i) => {
-    const row = el('button', 'qrow')
-    row.type = 'button'
-    const no = el('span', 'qi', String(users.length - i))
-    const txt = el('span', 'qt', it.text || '[图片]')
-    // 日期 + 时间：跨天/跨年的问题也能一眼分辨（原来只有时分，昨天的和上月的分不清）
-    const tm = el('span', 'qm', fmtTime(it.time))  // fmtTime 自带 今天/昨天/M月D日/[年份] 分层
-    row.append(no, txt, tm)
-    row.onclick = () => { vibrate(8); closeSheet(); jumpToItem(s, it) }
-    body.appendChild(row)
-  })
-}
-/* 收集本对话全部历史里的用户消息（不止当前窗口）：向更早翻页，折叠进临时对象、不动聊天区 */
-async function collectAllQuestions(s) {
-  const seen = new Set()
-  const out = []
-  const push = (it) => { if (it && it.kind === 'user') { const k = it.seq != null ? 's' + it.seq : 't' + it.time; if (!seen.has(k)) { seen.add(k); out.push(it) } } }
-  for (const it of s.items) push(it)
-  let through = s.oldestSeq, hasMore = s.hasMore, guard = 0
-  while (hasMore && through != null && through > 0 && guard++ < 30) {
-    const v = await rpc('session/page', { request: { address: followAddress(s.id), throughSeq: through - 1, maxMessages: 200 } })
-    const recs = v.records || []
-    if (!recs.length) break
-    const tmp = { items: [], callArgs: new Map(), live: null, _todoCalls: new Set(), _pendingCalls: [], _thinkBuf: '' }
-    for (const rec of recs) foldEvent(tmp, rec.event || rec)
-    for (const it of tmp.items) push(it)
-    const first = recs[0].event || recs[0]
-    if (typeof first.seq === 'number') through = first.seq
-    hasMore = !!v.hasMore
+  const acc = qAcc(s)
+  const list = el('div', 'q-list')
+  const nums = []
+  for (const it of acc.slice().reverse()) {   // 最新在上
+    const { row, no } = mkQRow(s, it, '·')
+    nums.push(no)
+    list.appendChild(row)
   }
-  out.sort((a, b) => (a.time || 0) - (b.time || 0))
-  return out   // 时间正序（旧→新）
+  if (acc.length) body.appendChild(list)
+  const foot = el('div', 'q-foot')
+  const spin = el('span', 'q-spin')
+  const label = el('span', null, '')
+  foot.append(spin, label)
+  body.appendChild(foot)
+  qPanel = { sid: s.id, list, nums, spin, label, total: acc.length, done: !!s._qAll, complete: !!s._qAll, empty: !acc.length && !s.hasMore }
+  if (s._qAll) qPanelNumber(acc)   // 命中缓存：序号直接给最终值
+  qPanelRefreshFoot()
+  if (!s._qAll && !qPanel.empty) scanQuestions(s)
+}
+function qPanelRefreshFoot() {
+  if (!qPanel) return
+  if (qPanel.empty) {
+    qPanel.spin.style.display = 'none'
+    qPanel.label.textContent = '这个对话里还没有你发过的消息'
+    return
+  }
+  if (qPanel.done) {
+    qPanel.spin.style.display = 'none'
+    qPanel.label.textContent = qPanel.complete ? '共 ' + qPanel.total + ' 条 · 已全部加载' : '共 ' + qPanel.total + ' 条（还有更早的没取完）'
+  } else {
+    qPanel.spin.style.display = ''
+    qPanel.label.textContent = qPanel.total ? '正在加载更早的提问…（已显示 ' + qPanel.total + ' 条）' : '正在加载全部提问…'
+  }
+}
+function qPanelAppend(s, freshAsc) {
+  if (!qPanel || qPanel.sid !== s.id || subPanelKind !== 'questions') return
+  for (let i = freshAsc.length - 1; i >= 0; i--) {   // 更早的一页：倒序追加到列表末尾
+    const { row, no } = mkQRow(s, freshAsc[i], '·')
+    qPanel.nums.push(no)
+    qPanel.list.appendChild(row)
+  }
+  qPanel.total += freshAsc.length
+  qPanelRefreshFoot()
+}
+/* 序号＝从最早数起第几条：全量到位后才填，避免边加载边跳号 */
+function qPanelNumber(acc) {
+  if (!qPanel) return
+  qPanel.nums.forEach((no, i) => { no.textContent = String(acc.length - i) })
+}
+function qPanelDone(s, complete) {
+  if (!qPanel || qPanel.sid !== s.id) return
+  qPanel.done = true
+  qPanel.complete = !!complete
+  qPanelNumber(qAcc(s))
+  qPanelRefreshFoot()
 }
 /* 定位到某条消息：不在当前窗口就向前翻页找，然后居中 + 高亮闪一下 */
 async function jumpToItem(s, ref) {
