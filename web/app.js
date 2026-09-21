@@ -2801,27 +2801,36 @@ function toast(text, opts) {
 function initPtr(sc) {
   const ind = $('#ptr')
   if (!sc || !ind) return
-  let startY = null, pulling = false
+  /* 方向锁：touchstart 不武装。只有「列表在顶部 + 明显下拉（纵向优势 1.5 倍）+ 没有卡片正在左滑」
+     才进入 PTR——左滑卡片时向下漂移不再误触发刷新（修「一边滑一边晃」）。 */
+  let sx = 0, sy = 0, decided = false, pulling = false
   sc.addEventListener('touchstart', (e) => {
-    if (sc.scrollTop <= 0 && e.touches.length === 1) { startY = e.touches[0].clientY; pulling = true }
+    if (e.touches.length === 1) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; decided = false; pulling = false }
   }, { passive: true })
   sc.addEventListener('touchmove', (e) => {
+    const dx = e.touches[0].clientX - sx, dy = e.touches[0].clientY - sy
+    if (!decided) {
+      if (Math.abs(dx) < 10 && Math.abs(dy) < 10) return
+      decided = true
+      pulling = sc.scrollTop <= 0 && dy > 0 && Math.abs(dy) > Math.abs(dx) * 1.5 && !document.querySelector('.swipe-wrap.dragging')
+    }
     if (!pulling) return
-    const dy = e.touches[0].clientY - startY
     if (dy > 12 && sc.scrollTop <= 0) {
       ind.classList.add('show')
       ind.textContent = dy > 72 ? '松开刷新' : '下拉刷新…'
     } else if (dy <= 4) ind.classList.remove('show')
   }, { passive: true })
-  sc.addEventListener('touchend', (e) => {
-    if (!pulling) return
-    pulling = false
-    const dy = e.changedTouches[0].clientY - startY
+  const finish = (e) => {
+    if (!pulling) { decided = false; return }
+    pulling = false; decided = false
+    const dy = e.changedTouches[0].clientY - sy
     if (dy > 72 && sc.scrollTop <= 0) {
       ind.textContent = '刷新中…'
       loadBase().finally(() => ind.classList.remove('show'))
     } else ind.classList.remove('show')
-  })
+  }
+  sc.addEventListener('touchend', finish)
+  sc.addEventListener('touchcancel', () => { pulling = false; decided = false; ind.classList.remove('show') })
 }
 
 /* ================= 深浅色主题 ================= */
@@ -3243,8 +3252,17 @@ if (window.visualViewport) {
   const app = $('#app')
   const applyVV = () => {
     const vv = window.visualViewport
-    if (keyboardLikelyOpen && vv.height < window.innerHeight - 120) app.style.height = Math.round(vv.height) + 'px'
-    else app.style.height = ''
+    // iOS 开键盘时会先把 layout 视口上推（offsetTop）去够底部输入框。
+    // 只钉 height=vv.height 不管 offsetTop：应用与可视区域错位，表现就是「整页被顶上去、上方全空白」。
+    // 正确做法：应用精确覆盖可视视口（top=offsetTop、height=vv.height）——
+    // 导航栏钉在屏幕顶，对话区压缩，输入框正好落在键盘上沿，即「只顶一部分」。
+    if (keyboardLikelyOpen && vv.height < window.innerHeight - 120) {
+      app.style.top = Math.round(vv.offsetTop) + 'px'
+      app.style.height = Math.round(vv.height) + 'px'
+    } else {
+      app.style.top = ''
+      app.style.height = ''
+    }
   }
   window.visualViewport.addEventListener('resize', applyVV)
   // 只在输入框聚焦（键盘弹起）时才钉高度：独立 PWA 首屏 vv 值不可靠
