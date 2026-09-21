@@ -601,10 +601,11 @@ html.light .sheet { box-shadow:0 -12px 44px rgba(15,23,42,.18); }
 .qt-chip .rm { flex:none; border:none; background:none; color:var(--text-3); font-size:13px; padding:2px 3px; cursor:pointer; min-width:20px; min-height:20px; }
 .qt-chip .rm:active { color:var(--red); }
 /* 注解面板 */
-.quote-full { flex:none; margin:4px 16px 0; background:var(--bg-card); border:.5px solid var(--line); border-left:3px solid var(--accent); border-radius:10px; padding:10px 12px; font-size:12.5px; line-height:1.6; color:var(--text-2); max-height:34vh; overflow-y:auto; white-space:pre-wrap; word-break:break-word; font-family:var(--font); }
-.note-in { margin:10px 16px 0; background:var(--bg-card); border:1px solid rgba(59,130,246,.4); border-radius:12px; padding:10px 12px; font-size:13.5px; color:var(--text); min-height:44px; max-height:110px; overflow-y:auto; outline:none; -webkit-user-modify:read-write-plaintext-only; }
+.quote-full { flex:none; margin:4px 16px 0; background:var(--bg-card); border:.5px solid var(--line); border-left:3px solid var(--accent); border-radius:10px; padding:9px 12px; font-size:12px; line-height:1.55; color:var(--text-2); max-height:16vh; overflow-y:auto; white-space:pre-wrap; word-break:break-word; font-family:var(--font); }
+.note-in { flex:1; margin:10px 16px 0; background:var(--bg-card); border:1px solid rgba(59,130,246,.4); border-radius:14px; padding:13px 14px; font-size:15px; line-height:1.6; color:var(--text); min-height:96px; overflow-y:auto; outline:none; -webkit-user-modify:read-write-plaintext-only; transition:border-color .2s; }
+.note-in:focus { border-color:var(--accent); }
 .note-in:empty::before { content:attr(data-ph); color:var(--text-3); }
-.qbtns { display:flex; gap:9px; margin:12px 16px 18px; }
+.qbtns { flex:none; display:flex; gap:9px; margin:12px 16px 4px; }
 .qbtns button { flex:1; border:none; border-radius:12px; padding:12px 0; font-size:14px; font-weight:650; font-family:var(--font); min-height:44px; }
 .qbtns .del { background:rgba(255,69,58,.12); color:var(--red); }
 .qbtns .ok { background:var(--accent); color:#fff; }
@@ -804,7 +805,7 @@ html.light .stale-strip .st-x { background:rgba(154,74,6,.12); }
 .q-chip .q-tag { font-size:10.5px; font-weight:700; color:var(--text-3); border:1px solid var(--line); border-radius:8px; padding:1px 6px; flex:none; }
 .q-chip .q-text { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 /* 排队操作单 */
-.q-sheet { max-height:64%; padding-bottom:14px; }
+.q-sheet { max-height:72%; padding-bottom:14px; }
 .act-row { display:flex; align-items:center; gap:12px; padding:14px 20px; font-size:15.5px; font-weight:600; cursor:pointer; }
 .act-row:active { background:var(--bg-card); }
 .act-row .ic { width:22px; text-align:center; }
