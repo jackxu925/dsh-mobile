@@ -885,9 +885,10 @@ function nearBottom(sc) { return sc.scrollHeight - sc.scrollTop - sc.clientHeigh
 function scrollBottom(sc, force) {
   if (!(force || nearBottom(sc))) return
   sc._lastStick = Date.now()
+  sc._selfScrollAt = Date.now()
   sc.scrollTop = sc.scrollHeight
   requestAnimationFrame(() => {
-    if (Math.abs(sc.scrollHeight - sc.scrollTop - sc.clientHeight) < 160) sc.scrollTop = sc.scrollHeight
+    if (Math.abs(sc.scrollHeight - sc.scrollTop - sc.clientHeight) < 160) { sc._selfScrollAt = Date.now(); sc.scrollTop = sc.scrollHeight }
   })
 }
 
@@ -1845,6 +1846,7 @@ function restoreAnchor(sc, a) {
   a.at = Date.now()
   sc._anchor = a
   const node = a.key ? sc.querySelector('[data-k="' + a.key + '"]') : null
+  sc._selfScrollAt = Date.now()   // 这是重建后的对位，不算用户在滑
   if (node) { sc.scrollTop += node.getBoundingClientRect().top - a.top; return }   // 同步对位（同一帧内完成，用户看不到中间态）
   if (a.gap != null) sc.scrollTop = sc.scrollHeight - a.gap                       // 兜底：锚点条目已被换掉
 }
@@ -1856,7 +1858,7 @@ function reanchorAfterLoad(sc) {
   const n = sc.querySelector('[data-k="' + a.key + '"]')
   if (!n) return
   const d = n.getBoundingClientRect().top - a.top
-  if (Math.abs(d) > 1) sc.scrollTop += d
+  if (Math.abs(d) > 1) { sc._selfScrollAt = Date.now(); sc.scrollTop += d }
 }
 async function loadEarlier(s) {
   if (s._loadingEarlier) return
@@ -2295,6 +2297,7 @@ function enterChat() {
   v.style.transform = ''
 }
 function leaveChat() {
+  qFloatHide()
   const v = chatView()
   if (!v || !v.classList.contains('active')) return
   v.classList.add('closing')
@@ -2340,6 +2343,7 @@ async function openSession(id, force) {
   $('#chat-title').textContent = sessTitle(s)
   showView('chat')
   s._newBelow = false
+  qFloatHide()
   hideNewMsgPill()
   const sc = chatScrollEl()
   sc.textContent = ''
@@ -3266,6 +3270,71 @@ function qPanelDone(s, complete) {
   qPanelNumber(qAcc(s))
   qPanelRefreshFoot()
 }
+/* ---- 滑动时飘出的「问过的问题」浮层：滑动中出现，停手 1.5s 淡出，点一条直接跳 ---- */
+let qFloatTimer = null   // 淡出计时
+let qFloatSig = ''       // 最近一次渲染的行集合：没变就不重建 DOM
+function qFloatHide() {
+  const box = $('#q-float')
+  if (box) { box.classList.remove('show'); box.setAttribute('aria-hidden', 'true') }
+}
+function qFloatHideSoon() {
+  if (qFloatTimer) clearTimeout(qFloatTimer)
+  qFloatTimer = setTimeout(() => { qFloatTimer = null; qFloatHide() }, 1500)
+}
+function qFloatCancelHide() { if (qFloatTimer) { clearTimeout(qFloatTimer); qFloatTimer = null } }
+/* 列出「当前滚动位置附近」那几个提问（用已渲染的 DOM 定位，跳转零等待）。
+   节流 120ms：惯性滚动期间每秒几十个 scroll 事件，不必每个都重排。 */
+function qFloatShow(force) {
+  const s = S.current ? sess(S.current) : null
+  const sc = chatScrollEl()
+  const box = $('#q-float')
+  const list = $('#qf-list')
+  if (!s || !sc || !box || !list) return
+  const nodes = Array.from(sc.querySelectorAll('.msg.user'))
+  const now = Date.now()
+  if (!force && now - (qFloatShow._at || 0) < 120) { qFloatHideSoon(); return }
+  qFloatShow._at = now
+  if (nodes.length < 2) { qFloatHide(); return }   // 只有一两条提问：不值得飘
+  const scRect = sc.getBoundingClientRect()
+  const offs = nodes.map((n) => n.getBoundingClientRect().top - scRect.top + sc.scrollTop)
+  let cur = -1
+  for (let i = 0; i < offs.length; i++) if (offs[i] <= sc.scrollTop + 64) cur = i
+  const from = Math.max(0, cur - 5)
+  const to = Math.min(nodes.length, (cur < 0 ? 0 : cur) + 7)
+  const sig = cur + '|' + nodes.length + '|' + from + '|' + to + '|' + nodes.slice(from, to).map((n) => n.dataset.k).join(',')
+  if (qFloatSig !== sig) {
+    qFloatSig = sig
+    list.textContent = ''
+    for (let i = from; i < to; i++) {
+      const n = nodes[i]
+      const it = s.items.find((x) => x.kind === 'user' && x.seq != null && 'u' + x.seq === n.dataset.k)
+      const row = el('button', 'qf-row' + (i === cur ? ' cur' : ''))
+      row.type = 'button'
+      row.dataset.k = n.dataset.k || ''
+      const txt = (n.querySelector('.bubble') || n).innerText || ''
+      row.appendChild(el('span', 'qf-t', txt.replace(/\s+/g, ' ').trim() || '[图片]'))
+      const tm = n.querySelector('.meta-time')
+      if (tm) row.appendChild(el('span', 'qf-m', tm.textContent))
+      row.onclick = () => {
+        vibrate(8)
+        qFloatHide()
+        if (it) jumpToItem(s, it)
+        else {   // 兜底：找不到条目对象就按节点位置滚过去
+          const top = n.getBoundingClientRect().top - sc.getBoundingClientRect().top + sc.scrollTop
+          sc._selfScrollAt = Date.now()
+          s.follow = false
+          sc.scrollTop = Math.max(0, top - sc.clientHeight / 2)
+        }
+      }
+      list.appendChild(row)
+    }
+    const cnt = $('#qf-cnt')
+    if (cnt) cnt.textContent = '已加载 ' + nodes.length + ' 条'
+  }
+  box.classList.add('show')
+  box.setAttribute('aria-hidden', 'false')
+  qFloatHideSoon()
+}
 /* 定位到某条消息：不在当前窗口就向前翻页找，然后居中 + 高亮闪一下 */
 async function jumpToItem(s, ref) {
   // 引用可能来自「翻全历史」收集的临时对象：按 seq/time/文本 匹配，而不是对象同一性
@@ -3660,6 +3729,10 @@ function buildShell() {
       <span class="tb-track"><i class="tb-fill" id="tb-fill"></i></span>
     </div>
     <div class="chat-scroll" id="chat-scroll"></div>
+    <div class="q-float" id="q-float" aria-hidden="true">
+      <div class="qf-head"><span>问过的问题</span><span class="qf-cnt" id="qf-cnt"></span></div>
+      <div class="qf-list" id="qf-list"></div>
+    </div>
     <div class="composer-wrap">
       <div class="stale-strip" id="stale-strip" style="display:none"></div>
       <div class="stale-strip off" id="offline-strip" style="display:none"></div>
@@ -3901,16 +3974,22 @@ function buildShell() {
   // 「↓」pill：不在底部时始终显示（回到底部）；有新消息时升级为「↓ 新消息」
   onTap($('#new-msg-pill'), () => {   // 靠近输入区，同样走 touchend 派发
     const sc = chatScrollEl()
-    if (sc) sc.scrollTop = sc.scrollHeight
+    if (sc) { sc._selfScrollAt = Date.now(); sc.scrollTop = sc.scrollHeight }
     if (S.current) sess(S.current)._newBelow = false
     updateJumpPill()
   })
+  // 浮层内部在滑/按住：别把浮层收走
+  const qf = $('#q-float')
+  if (qf) {
+    qf.addEventListener('touchstart', () => { qFloatCancelHide(); qFloatShow(true) }, { passive: true })
+    qf.addEventListener('scroll', () => { qFloatCancelHide(); qFloatHideSoon() }, true)
+  }
   // 图片解码后高度撑开会改变滚动几何：若 2.5s 内刚做过钉底决策，补钉一次（load 不冒泡，必须 capture）
   chatScrollEl().addEventListener('load', (e) => {
     if (!(e.target instanceof HTMLImageElement)) return
     const sc = chatScrollEl()
     if (!sc) return
-    if (S.current && sess(S.current).follow) { sc.scrollTop = sc.scrollHeight; return }
+    if (S.current && sess(S.current).follow) { sc._selfScrollAt = Date.now(); sc.scrollTop = sc.scrollHeight; return }
     reanchorAfterLoad(sc)
   }, true)
   $('#chat-scroll').addEventListener('scroll', () => {
@@ -3919,6 +3998,8 @@ function buildShell() {
     if (S.current) sess(S.current).follow = nearBottom(sc)  // 跟随意图：到底 true、离开 false
     // 用户滚动会刷新锚点期望值：图片补位逻辑就不会把「用户自己滑的距离」当成排版位移补回去
     if (sc._anchor && sc._anchor.key) { const n = sc.querySelector('[data-k="' + sc._anchor.key + '"]'); if (n) sc._anchor.top = n.getBoundingClientRect().top }
+    // 用户真的在滑（不是重建后对位/钉底）→ 飘出提问浮层；停手 1.5s 自己淡出
+    if (Date.now() - (sc._selfScrollAt || 0) > 200) qFloatShow()
     updateJumpPill()
     // 滚动到顶部附近：自动加载更早（无感，无按钮）。
     // 冷却 350ms：一次快速上滑别连着拉好几页（拉完锚点回位后 scrollTop 会离开顶部，冷却只是兜底）
