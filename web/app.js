@@ -1848,8 +1848,35 @@ function restoreAnchor(sc, a) {
   sc._anchor = a
   const node = a.key ? sc.querySelector('[data-k="' + a.key + '"]') : null
   sc._selfScrollAt = Date.now()   // 这是重建后的对位，不算用户在滑
-  if (node) { sc.scrollTop += node.getBoundingClientRect().top - a.top; return }   // 同步对位（同一帧内完成，用户看不到中间态）
-  if (a.gap != null) sc.scrollTop = sc.scrollHeight - a.gap                       // 兜底：锚点条目已被换掉
+  if (node) { sc.scrollTop += node.getBoundingClientRect().top - a.top; settleAnchor(sc); return }   // 同步对位（同一帧内完成，用户看不到中间态）
+  if (a.gap != null) { sc.scrollTop = sc.scrollHeight - a.gap; settleAnchor(sc) }                    // 兜底：锚点条目已被换掉
+}
+/* 还原后再校一次：个别时序下（流式内容增长期间）还原落位后布局还会再变，出现几十~百来像素的漂移。
+   短窗内按锚点静默补回；用户一旦滚动，锚点期望值已被滚动监听刷新，天然不会跟用户抢。 */
+function settleAnchor(sc) {
+  if (!sc || !sc._anchor || !sc._anchor.key) return
+  // 自己留一份期望：sc._anchor 会被后续渲染重新捕获（渲染锚定在漂移后的位置，期望值就被「洗白」了）
+  const own = { key: sc._anchor.key, top: sc._anchor.top, at: sc._anchor.at }
+  let userMoved = false
+  let lastFix = 0
+  const born = Date.now()
+  // 真用户一定会触摸：touch 一来立刻让位；滚动事件兜底（桌面滚轮/别的程序化滚动），但豁免自己出生时的还原与自己的修正
+  const onTouch = () => { userMoved = true }
+  const onScroll = () => { if (Date.now() - lastFix > 80 && Date.now() - born > 80) userMoved = true }   // 只豁免还原/修正自身的事件（一两帧内），别的滚动一律让位
+  sc.addEventListener('touchstart', onTouch, { passive: true, once: true })
+  sc.addEventListener('scroll', onScroll, { passive: true })
+  const stop = () => { sc.removeEventListener('scroll', onScroll); sc.removeEventListener('touchstart', onTouch) }
+  const check = () => {
+    if (userMoved || Date.now() - own.at > 1600) { stop(); return }
+    const n = sc.querySelector('[data-k="' + own.key + '"]')
+    if (!n) { stop(); return }
+    const d = n.getBoundingClientRect().top - own.top
+    if (Math.abs(d) > 1 && Math.abs(d) < 240) { lastFix = Date.now(); sc._selfScrollAt = lastFix; sc.scrollTop += d }
+  }
+  // 逐帧校验 1.5s：实测漂移会落在还原后几百毫秒（流式期间布局晚变），定时点会错过；
+  // 逐帧则无论何时漂都在一帧内补回。每帧就一次 querySelector + 一次 rect，开销可忽略
+  const loop = () => { check(); if (!userMoved && Date.now() - own.at < 1600) requestAnimationFrame(loop); else stop() }
+  requestAnimationFrame(loop)
 }
 /* 翻页后新内容里的图片解码撑高会把正在读的位置顶走（不认识宽高的图先按占位高度排版）。
    2.5s 内按锚点把位移吃掉；用户自己滚动时会刷新锚点期望值，所以不会跟用户抢滚动。 */
@@ -1859,7 +1886,9 @@ function reanchorAfterLoad(sc) {
   const n = sc.querySelector('[data-k="' + a.key + '"]')
   if (!n) return
   const d = n.getBoundingClientRect().top - a.top
-  if (Math.abs(d) > 1) { sc._selfScrollAt = Date.now(); sc.scrollTop += d }
+  // 上限 400：图片解码撑高一般 ≤ 一张图；几百像素的巨额偏差多半是锚点期望值过期（滚动事件还没刷新到），
+  // 无上限照补会拿旧期望把视图拽回去（实测出现过 +529 的拽动）
+  if (Math.abs(d) > 1 && Math.abs(d) <= 400) { sc._selfScrollAt = Date.now(); sc.scrollTop += d }
 }
 /* 增量前插：翻页只把新条目的节点插到顶上，不重建整条时间线。
    窗口大了（几千条）整体重建要几十上百毫秒，上滑时正好被看到——那才是「卡顿」的来源。 */
@@ -1905,7 +1934,7 @@ async function loadEarlier(s, opts) {
   if (s._loadingEarlier) return
   if (s.oldestSeq === null || s.oldestSeq <= 0) return
   const maxMessages = (opts && opts.maxMessages) || 40
-  const render = !(opts && opts.render === false)   // 跳转翻页传 false：只把内容并进 s.items，最后一次性渲染
+  const render = !(opts && opts.render === false)
   s._loadingEarlier = true
   try {
     const v = await rpc('session/page', { request: { address: followAddress(s.id), throughSeq: s.oldestSeq - 1, maxMessages } })
@@ -2490,7 +2519,8 @@ function ensureRunDurTimer() {
   if (runDurTimer) return
   runDurTimer = setInterval(() => {
     const s = S.current ? sess(S.current) : null
-    if (!s || !s.running || !document.querySelector('#view-chat.active')) { clearInterval(runDurTimer); runDurTimer = null; return }
+    if (!s || !s.running) { clearInterval(runDurTimer); runDurTimer = null; return }   // 真停了才收计时器
+    if (!document.querySelector('#view-chat.active')) return   // 暂时不在对话页：跳过本轮即可，别自杀（复活要等下一次渲染，安静期会一直死着）
     refreshRunDur(s)
   }, 1000)
 }
