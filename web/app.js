@@ -3299,6 +3299,8 @@ let qPanel = null   // 打开着的提问抽屉（增量追加 / 收尾改文案
 function mkQRow(s, it, numEl, close) {
   const row = el('button', 'qrow')
   row.type = 'button'
+  const rk = itemKey(it)
+  if (rk) row.dataset.k = rk   // 与对话流里的条目同键：打开清单时按它定位「当前所在的问题」
   const no = el('span', 'qi', numEl)
   const txt = el('span', 'qt', it.text || '[图片]')
   // 日期 + 时间：跨天/跨年的问题也能一眼分辨
@@ -3309,7 +3311,23 @@ function mkQRow(s, it, numEl, close) {
 }
 /* 把问题列表渲染进给定容器（⋯ 子面板 / 微信式浮窗抽屉共用）：
    立即出当前已知的，扫描在后台继续，扫到一页就追加一页 */
-function buildQuestionList(s, listEl, footEl, close) {
+/* 用户当前所在的提问：对话时间线里视野上沿之上的最后一条用户消息
+   （正在读它的回答；在底部/跟随时自然就是最新一条） */
+function nearestQuestionKey() {
+  const sc = chatScrollEl()
+  if (!sc) return null
+  const scTop = sc.getBoundingClientRect().top
+  let best = null
+  let first = null
+  for (const n of sc.querySelectorAll('.msg.user')) {
+    if (!first) first = n
+    if (n.getBoundingClientRect().top - scTop <= 64) best = n
+    else break
+  }
+  const hit = best || first   // 视野上方一条都没有（在窗口最顶端）→ 取下方第一条
+  return hit ? (hit.dataset.k || null) : null
+}
+function buildQuestionList(s, listEl, footEl, close, focusKey) {
   listEl.textContent = ''
   if (footEl && footEl !== listEl) footEl.textContent = ''
   const acc = qAcc(s)
@@ -3330,8 +3348,31 @@ function buildQuestionList(s, listEl, footEl, close) {
   if (s._qAll) qPanelNumber(acc)   // 命中缓存：序号直接给最终值
   qPanelRefreshFoot()
   if (!s._qAll && !qPanel.empty) scanQuestions(s)
-  // 打开就停在最新一条（列表底部）
-  if (listEl.scrollHeight > listEl.clientHeight) listEl.scrollTop = listEl.scrollHeight
+  // 定位：给了 focusKey 就以「当前所在的问题」为中心（闪一下）；否则停在最新一条（列表底部）
+  const focusRow = focusKey ? listEl.querySelector('.qrow[data-k="' + focusKey + '"]') : null
+  qPanel.focusKey = focusRow ? focusKey : null
+  qPanel.focused = false        // 还没居中过（首开行数少、列表不可滚时等追加/收尾再居中）
+  qPanel.touched = false        // 用户在抽屉里滚过就让位
+  if (focusRow) {
+    focusRow.classList.remove('q-flash')
+    void focusRow.offsetWidth
+    focusRow.classList.add('q-flash')
+    setTimeout(() => focusRow.classList.remove('q-flash'), 1800)
+  }
+  if (listEl.scrollHeight > listEl.clientHeight) {
+    if (qPanel.focusKey) qCenterFocus(listEl)
+    else { listEl._selfAt = Date.now(); listEl.scrollTop = listEl.scrollHeight }
+  }
+}
+/* 把「当前所在的问题」那行居中；列表还不可滚时先记着（追加/收尾后再居中） */
+function qCenterFocus(listEl) {
+  if (!qPanel || !qPanel.focusKey || qPanel.touched) return   // 用户碰过就让位；没碰过每次追加后重新居中（首开列表短，居中会随列表长全而收敛）
+  const row = listEl.querySelector('.qrow[data-k="' + qPanel.focusKey + '"]')
+  if (!row) return
+  listEl._selfAt = Date.now()   // 自己的程序化滚动，别被当成用户滚动
+  listEl.scrollTop = Math.max(0, row.getBoundingClientRect().top - listEl.getBoundingClientRect().top + listEl.scrollTop - listEl.clientHeight / 2 + row.offsetHeight / 2)
+  qPanel.focused = true
+  qPanel.pinned = listEl.scrollHeight - listEl.scrollTop - listEl.clientHeight < 40   // 恰好是最新一条时保持吸底
 }
 function qPanelRefreshFoot() {
   if (!qPanel) return
@@ -3360,8 +3401,10 @@ function qPanelAppend(s, freshAsc) {
     list.prepend(row)
   }
   qPanel.total += freshAsc.length
+  sc._selfAt = Date.now()   // 自己的程序化滚动：别被滚动监听当成用户碰过（那会废掉定位居中）
   if (qPanel.pinned) sc.scrollTop = sc.scrollHeight   // 还没开始往上翻读：一直吸在最新一条
   else sc.scrollTop = sc.scrollHeight - gap           // 已经在读了：视野不动
+  if (sc.scrollHeight > sc.clientHeight) qCenterFocus(sc)   // 首开时行数不够没居中成：现在补（没被用户碰过就每次追加后重居中，随列表长全收敛）
   qPanelRefreshFoot()
 }
 /* 序号＝从最早数起第几条：全量到位后才填，避免边加载边跳号（列表是时间线顺序，第 i 行就是第 i+1 条） */
@@ -3374,7 +3417,8 @@ function qPanelDone(s, complete) {
   qPanel.done = true
   qPanel.complete = !!complete
   qPanelNumber(qAcc(s))
-  if (qPanel.pinned) qPanel.scroller.scrollTop = qPanel.scroller.scrollHeight   // 全量落地：吸回最新一条
+  if (qPanel.focusKey) qCenterFocus(qPanel.scroller)          // 有定位目标：居中到当前问题
+  else if (qPanel.pinned) { qPanel.scroller._selfAt = Date.now(); qPanel.scroller.scrollTop = qPanel.scroller.scrollHeight }   // 全量落地：吸回最新一条
   qPanelRefreshFoot()
 }
 /* ---- 微信式浮窗把手：藏在右边缘，点开就是完整的提问列表（全量，不只是当前屏） ---- */
@@ -3386,11 +3430,16 @@ function openQDrawer() {
   d.classList.add('open'); d.setAttribute('aria-hidden', 'false')
   scrim.classList.add('open')
   h.setAttribute('aria-expanded', 'true'); h.classList.add('hidden')
-  buildQuestionList(s, $('#qd-list'), $('#qd-foot'), closeQDrawer)   // 渲染内部会把滚动停在最新一条（列表底部）
+  buildQuestionList(s, $('#qd-list'), $('#qd-foot'), closeQDrawer, nearestQuestionKey())   // 定位到对话里当前所在的问题（在底部时自然就是最新一条）
   const ql = $('#qd-list')
   if (ql && !ql._pinWired) {
     ql._pinWired = true
-    ql.addEventListener('scroll', () => { if (qPanel && qPanel.list === ql.querySelector('.q-list')) qPanel.pinned = ql.scrollHeight - ql.scrollTop - ql.clientHeight < 40 }, { passive: true })
+    // 让位只认真实输入（touch/滚轮）：scroll 事件区分不了程序化还是用户（重负载下事件派发能滞后上百毫秒）
+    ql.addEventListener('touchstart', () => { if (qPanel) qPanel.touched = true }, { passive: true })
+    ql.addEventListener('wheel', () => { if (qPanel) qPanel.touched = true }, { passive: true })
+    ql.addEventListener('scroll', () => {
+      if (qPanel && qPanel.list === ql.querySelector('.q-list')) qPanel.pinned = ql.scrollHeight - ql.scrollTop - ql.clientHeight < 40
+    }, { passive: true })
   }
 }
 function closeQDrawer() {
