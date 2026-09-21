@@ -433,7 +433,7 @@ function foldEvent(s, event, view) {
           break
         }
       }
-      s.items.push({ kind: 'user', text, images: images.length ? images : null, time: event.time })
+      s.items.push({ kind: 'user', text, images: images.length ? images : null, time: event.time, seq: event.seq, rpcId: rid || null })
       s.lastPreview = text || '[图片]'
       break
     }
@@ -447,7 +447,7 @@ function foldEvent(s, event, view) {
       // 「只有思考、没有正文」是每个工具步骤前的常态（一轮里能有上百条）：
       // 单独成条会渲染成一排空泡泡，所以先攒着，挂到下一条真正的内容上
       if (!text.trim()) { s._thinkBuf = (s._thinkBuf || '') + reasoning; break }
-      s.items.push({ kind: 'assistant', text, reasoning: takeThinkBuf(s) + reasoning, time: event.time })
+      s.items.push({ kind: 'assistant', text, reasoning: takeThinkBuf(s) + reasoning, time: event.time, seq: event.seq, turn: d.turn })
       s.lastPreview = text
       break
     }
@@ -498,7 +498,7 @@ function foldEvent(s, event, view) {
       }
       break
     }
-    case 'turn/start': s.running = true; break
+    case 'turn/start': s.running = true; s._curTurn = d.turn; break
     case 'turn/end': {
       s.running = false
       endLive(s, null, null)
@@ -848,6 +848,7 @@ function itemNode(s, item) {
   switch (item.kind) {
     case 'user': {
       const m = el('div', 'msg user')
+      m.dataset.q = item.rpcId || item.time || ''
       const b = el('div', 'bubble' + (item.pending ? ' pending' : '') + (item.failed ? ' failed' : ''))
       if (item.text) b.innerHTML = linkifyText(item.text)  // 裸 URL 可点；换行由 pre-wrap 保留
       if (item.images) for (const img of item.images) {
@@ -892,6 +893,12 @@ function itemNode(s, item) {
         meta.appendChild(cp)
       }
       if (item.reasoning && item.reasoning.trim()) meta.appendChild(thinkDot(() => openThink({ text: item.reasoning, live: false })))
+      // 分叉（移植桌面端「轮尾 branch」语义）：只在已完成的轮次上开放；子代理会话不开放
+      if (item.seq != null && !s.subagent && turnComplete(s, item)) {
+        const fk = metaIcon('fork', '从这里分叉：复制「到这条回答为止」的历史成新会话')
+        fk.onclick = (e) => { e.stopPropagation(); vibrate(8); showForkConfirm(fk, s, item) }
+        meta.appendChild(fk)
+      }
       m.appendChild(meta)
       return m
     }
@@ -2500,6 +2507,7 @@ function refreshSheetViews(s) {
   else if (subPanelKind === 'perm') renderPermPanel(s)
   else if (subPanelKind === 'send') renderSendPanel(s)
   else if (subPanelKind === 'stats') renderStatsPanel(s)
+  else if (subPanelKind === 'questions') renderQuestionsPanel(s)
 }
 /* 当前模型的展示名（含强度），如「glm-5.3 · Max」 */
 function modelLabel(s) {
@@ -2574,6 +2582,9 @@ function renderSheet(s) {
     const st = todoStats(s)
     c.appendChild(valueRow('任务清单', st.done + '/' + st.total + ' 已完成', st.allDone ? '✓ 全部完成' : '进行中', () => { closeSheet(); openTaskSheet(s) }))
   }
+  // ---- 问过的问题（本对话里用户发过的消息，点击定位回时间线）----
+  const qCount = s.items.filter((i) => i.kind === 'user').length + (s.hasMore ? 1 : 0) * 0
+  if (qCount > 0) c.appendChild(valueRow('问过的问题', '本对话里你发过的消息', qCount + ' 条', () => openQuestionsPanel(s)))
   // ---- 模型 ----
   c.appendChild(valueRow('模型', '切换模型 / 思考强度', modelLabel(s), () => openModelPanel(s)))
   // ---- 权限 ----
@@ -2650,6 +2661,109 @@ function renderModelPanel(s) {
     for (const mod of g.models || []) body.appendChild(modelRow(s, g, mod, cur))
   }
   for (const f of m.failures || []) body.appendChild(el('div', 'sheet-note', '⚠️ ' + f.name + '：' + f.message))
+}
+/* ---- 问过的问题面板：最新在上，点击关闭并定位到时间线 ---- */
+function openQuestionsPanel(s) {
+  openSubPanel('questions', '问过的问题', () => renderQuestionsPanel(s))
+}
+function renderQuestionsPanel(s) {
+  const body = $('#sub-body')
+  if (!body) return
+  body.textContent = ''
+  const users = s.items.filter((i) => i.kind === 'user').slice().reverse()
+  if (!users.length) { body.appendChild(el('div', 'sheet-note', '这个窗口内还没有你发的消息')); return }
+  if (s.hasMore) body.appendChild(el('div', 'sheet-note', '只列出当前窗口内的；更早的会在你点击时自动向前翻页寻找'))
+  users.forEach((it, i) => {
+    const row = el('button', 'qrow')
+    row.type = 'button'
+    const no = el('span', 'qi', String(users.length - i))
+    const txt = el('span', 'qt', it.text || '[图片]')
+    const tm = el('span', 'qm', fmtTime(it.time))
+    row.append(no, txt, tm)
+    row.onclick = () => { vibrate(8); closeSheet(); jumpToItem(s, it) }
+    body.appendChild(row)
+  })
+}
+/* 定位到某条消息：不在当前窗口就向前翻页找，然后居中 + 高亮闪一下 */
+async function jumpToItem(s, item) {
+  let guard = 0
+  while (!s.items.includes(item) && s.hasMore && guard++ < 12) {
+    await loadEarlier(s).catch(() => {})
+  }
+  if (S.current !== s.id) return
+  // 跳转=用户要看历史：置 follow=false，否则运行中的会话会在下一次渲染时被重新拽回底部；
+  // 并且必须用瞬时定位（smooth 动画会被 80ms 一轮的重建销毁目标节点而中断）
+  s.follow = false
+  renderChat(s)
+  const key = item.rpcId || item.time
+  let node = null
+  const sc = chatScrollEl()
+  if (sc) {
+    node = sc.querySelector('[data-q="' + key + '"]')
+    if (!node) {
+      // 兜底：按文本+类型找（rpcId/time 都可能有极端重复）
+      const want = (item.text || '').slice(0, 24)
+      for (const n of sc.querySelectorAll('.msg.user .bubble')) {
+        if (want && n.textContent.slice(0, 24) === want) { node = n.closest('.msg'); break }
+      }
+    }
+  }
+  if (!node) return
+  node.scrollIntoView({ block: 'center', behavior: 'auto' })
+  node.classList.remove('q-flash')
+  void node.offsetWidth
+  node.classList.add('q-flash')
+  setTimeout(() => node.classList.remove('q-flash'), 1800)
+}
+/* ================= 消息分叉（移植桌面端轮尾 branch） ================= */
+/* 桌面语义：forkAt(seq) → 服务端找 ≥seq 的 turn/end，历史切到该轮结束；
+   只允许已完成的轮次（否则 fork-unavailable）；子会话标题加 (n) 后缀并直接打开。 */
+function turnComplete(s, item) {
+  if (item.turn == null) return !s.running
+  if (s._curTurn == null) return !s.running
+  return item.turn < s._curTurn || !s.running
+}
+function increasedForkTitle(title) {
+  const ascii = /^(.*?)\((\d+)\)$/.exec(title)
+  if (ascii) return ascii[1] + '(' + (BigInt(ascii[2]) + 1n) + ')'
+  const full = /^(.*?)（(\d+)）$/.exec(title)
+  if (full) return full[1] + '（' + (BigInt(full[2]) + 1n) + '）'
+  return title + ' (1)'
+}
+function showForkConfirm(anchorEl, s, item) {
+  const old = document.querySelector('.fork-pop')
+  if (old) old.remove()
+  const pop = el('div', 'fork-pop')
+  const y = el('button', 'fp-y', '⑂ 从这里分叉')
+  y.type = 'button'
+  const n = el('button', 'fp-n', '取消')
+  n.type = 'button'
+  pop.append(y, n)
+  document.body.appendChild(pop)
+  const r = anchorEl.getBoundingClientRect()
+  pop.style.left = Math.max(10, Math.min(r.left - 40, window.innerWidth - pop.offsetWidth - 10)) + 'px'
+  pop.style.top = Math.max(10, r.bottom + 6) + 'px'
+  n.onclick = () => pop.remove()
+  const dismiss = (e) => { if (!pop.contains(e.target) && e.target !== anchorEl) { pop.remove(); document.removeEventListener('click', dismiss, true) } }
+  setTimeout(() => document.addEventListener('click', dismiss, true), 10)
+  y.onclick = async () => {
+    pop.remove()
+    y.disabled = true
+    try {
+      // 1) 服务端切历史：≥atSeq 的 turn/end 为止（桌面同款 atSeq=该条消息事件 seq）
+      const v = await rpc('session/fork', { request: { sessionId: s.id, atSeq: item.seq } })
+      const childId = v.sessionId
+      // 2) 标题加 (n) 后缀（移植桌面 increasedForkTitle；失败不阻断打开）
+      try { await rpc('session/rename', { request: { sessionId: childId, title: increasedForkTitle(sessTitle(s)) } }) } catch (e2) {}
+      vibrate(12)
+      toast('已分叉：新会话「' + increasedForkTitle(sessTitle(s)) + '」')
+      loadBase()
+      location.hash = '#/s/' + childId   // 桌面行为：创建后直接打开
+    } catch (e) {
+      const msg = String((e && e.message) || e)
+      toast(/fork-unavailable|not completed|no completed turn/i.test(msg) ? '这一轮还没完成，完成后再分叉' : '分叉失败：' + msg, true)
+    }
+  }
 }
 /* ---- 权限面板 ---- */
 function openPermPanel(s) {
