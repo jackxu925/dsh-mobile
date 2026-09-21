@@ -992,11 +992,11 @@ function statusBadge(s) {
   if (s.running) return ['running', '运行中']
   return ['done', '空闲']
 }
-/* 会话 → 工作区归属（sessionIds 精确匹配，cwd 兜底） */
+/* 会话 → 工作区归属：严格跟随宿主注册表（workspace/follow 的 sessionIds）。
+ * 曾有「cwd 相同也归入」的兜底——但宿主对未挂载的会话显示「未归类」（cwd 只是它创建时的目录），
+ * 兜底会让手机和桌面口径分叉（实测：cwd 恰好等于某工作区路径的未挂载会话被错误归组）。 */
 function findWs(s) {
-  return S.workspaces.find((w) => (w.sessionIds || []).includes(s.id))
-    || S.workspaces.find((w) => s.cwd && w.path && s.cwd.toLowerCase() === w.path.toLowerCase())
-    || null
+  return S.workspaces.find((w) => (w.sessionIds || []).includes(s.id)) || null
 }
 function renderList() {
   const wrap = $('#session-list')
@@ -1070,7 +1070,7 @@ function renderList() {
   const wsSorted = S.workspaces
     .map((ws) => ({ id: ws.workspaceId, name: ws.title || ws.path, iconName: 'folder', list: byWs.get(ws.workspaceId) }))
     .filter((x) => x.list && x.list.length)
-  if (ungrouped.length) wsSorted.push({ id: '__other__', name: S.workspaces.length ? '其他' : '会话', iconName: 'chat', list: ungrouped })
+  if (ungrouped.length) wsSorted.push({ id: '__other__', name: '未分类', iconName: 'chat', list: ungrouped })
   // 工作区本身按「组内最近活跃」排序（visible 已按 updatedAt 降序，每组第一条即最新）
   wsSorted.sort((a, b) => b.list[0].updatedAt - a.list[0].updatedAt)
   // 下钻态：工作区没了（会话全部归档等）就退回列表
