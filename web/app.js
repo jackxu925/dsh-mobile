@@ -938,6 +938,14 @@ function openQuoteSheet(sid, i) {
   const note = $('#quote-note')
   note.textContent = q.note || ''
   ovSet('quote-ov', true)
+  // 立刻聚焦输入框并拉起键盘：用户点 chip 就是要写注解，不该再点一次输入框。
+  // 延迟到 sheet 滑入动画完成后再 focus（iOS 对刚打开的 fixed 容器内 focus 有时不拉键盘）
+  setTimeout(() => {
+    try { note.focus({ preventScroll: true }) } catch (e) { note.focus() }
+    // 光标移到末尾
+    const sel = window.getSelection()
+    if (sel) { sel.selectAllChildren(note); sel.collapseToEnd() }
+  }, 320)
 }
 function itemNode(s, item) {
   switch (item.kind) {
