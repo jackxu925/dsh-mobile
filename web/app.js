@@ -96,7 +96,7 @@ const ICONS = {
   globe: SVG_OPEN + '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a13.5 13.5 0 0 1 0 18M12 3a13.5 13.5 0 0 0 0 18"/></svg>',
   wrench: SVG_OPEN + '<path d="M14.7 6.3a4.5 4.5 0 0 0-6 6L3 18l3 3 5.7-5.7a4.5 4.5 0 0 0 6-6L14 13l-3-3 3.7-3.7z"/></svg>',
   trash: SVG_OPEN + '<path d="M4 7h16M9 7V5a1.5 1.5 0 0 1 1.5-1.5h3A1.5 1.5 0 0 1 15 5v2m3 0-.8 12a2 2 0 0 1-2 1.9H8.8a2 2 0 0 1-2-1.9L6 7"/><path d="M10 11v6M14 11v6"/></svg>',
-  quote: SVG_OPEN + '<path d="M9.5 8H7.8C6.2 8 5 9.3 5 11s1 3 2.4 3c1.2 0 2-.8 2-2 0-1-.7-1.8-1.7-1.8h-.3c.2-1 .9-1.7 2-1.9zM17 8h-1.7c-1.6 0-2.8 1.3-2.8 3s1 3 2.4 3c1.2 0 2-.8 2-2 0-1-.7-1.8-1.7-1.8h-.3c.2-1 .9-1.7 2-1.9z"/>',
+  quote: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 17h3l2-4V7H5v6h3zm8 0h3l2-4V7h-6v6h3z"/></svg>',
   fork: SVG_OPEN + '<circle cx="6" cy="5" r="2.2"/><circle cx="18" cy="5" r="2.2"/><circle cx="12" cy="19" r="2.2"/><path d="M6 7.2v2a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3v-2M12 12.2v4.6"/></svg>',
   archive: SVG_OPEN + '<rect x="3" y="4" width="18" height="4.5" rx="1.5"/><path d="M5 8.5V19a1.5 1.5 0 0 0 1.5 1.5h11A1.5 1.5 0 0 0 19 19V8.5M10 12.5h4"/></svg>',
   sliders: SVG_OPEN + '<path d="M4 8h16M4 16h16"/><circle cx="9" cy="8" r="2.2"/><circle cx="15" cy="16" r="2.2"/></svg>',
@@ -2700,8 +2700,11 @@ function renderSheet(s) {
     c.appendChild(valueRow('任务清单', st.done + '/' + st.total + ' 已完成', st.allDone ? '✓ 全部完成' : '进行中', () => { closeSheet(); openTaskSheet(s) }))
   }
   // ---- 问过的问题（本对话里用户发过的消息，点击定位回时间线）----
-  const qCount = s.items.filter((i) => i.kind === 'user').length + (s.hasMore ? 1 : 0) * 0
-  if (qCount > 0) c.appendChild(valueRow('问过的问题', '本对话里你发过的消息', qCount + ' 条', () => openQuestionsPanel(s)))
+  // 计数是全量历史（后台算好缓存在 s._qTotal；首次进会话可能还在算，显示 …）
+  if (s._qTotal === undefined) countQuestionsSoon(s)
+  const qCount = s._qTotal !== undefined ? s._qTotal : s.items.filter((i) => i.kind === 'user').length
+  const qVal = s._qTotal === undefined ? '…' : qCount + ' 条'
+  if (qCount > 0 || s.hasMore || s._qTotal === undefined) c.appendChild(valueRow('问过的问题', '本对话里你发过的消息', qVal, () => openQuestionsPanel(s)))
   // ---- 模型 ----
   c.appendChild(valueRow('模型', '切换模型 / 思考强度', modelLabel(s), () => openModelPanel(s)))
   // ---- 权限 ----
@@ -2779,6 +2782,18 @@ function renderModelPanel(s) {
   }
   for (const f of m.failures || []) body.appendChild(el('div', 'sheet-note', '⚠️ ' + f.name + '：' + f.message))
 }
+/* 后台算全量问题数（首次进会话时触发，结果缓存到 s._qTotal；菜单开着就刷新显示） */
+function countQuestionsSoon(s) {
+  if (s._qCounting) return
+  s._qCounting = true
+  collectAllQuestions(s)
+    .then((list) => { s._qTotal = list.length })
+    .catch(() => { s._qTotal = s.items.filter((i) => i.kind === 'user').length })
+    .finally(() => {
+      s._qCounting = false
+      if (sheetSession === s.id) refreshSheetViews(s)   // 菜单开着 → 就地更新计数
+    })
+}
 /* ---- 问过的问题面板：最新在上，点击关闭并定位到时间线 ---- */
 function openQuestionsPanel(s) {
   openSubPanel('questions', '问过的问题', () => renderQuestionsPanel(s))
@@ -2791,6 +2806,7 @@ async function renderQuestionsPanel(s) {
   const users = await collectAllQuestions(s).catch(() => s.items.filter((i) => i.kind === 'user'))
   if (S.current !== s.id || subPanelKind !== 'questions') return   // 用户已离开
   body.textContent = ''
+  s._qTotal = users.length   // 面板打开过就顺手缓存
   if (!users.length) { body.appendChild(el('div', 'sheet-note', '这个对话里还没有你发过的消息')); return }
   const newest = users.slice().reverse()
   newest.forEach((it, i) => {
