@@ -941,6 +941,9 @@ function renderChat(s, forceScroll) {
   // 钉不钉看「用户意图」而不是此刻位置：图片撑开/内容抖动造成的瞬时脱底不该永久取消跟随；
   // 只有用户真的上滑（scroll 事件里 gap 超阈值）才置 follow=false
   const stick = forceScroll || s.follow
+  // 不在底部时先记下「视野顶部那条内容」：清空重建会把 scrollTop 夹回 0（阅读位置直接跳回最上面），
+  // 重建后按锚点对回原位——翻页插入旧消息、运行中刷新、图片解码都走这一条路
+  const anchor = stick ? null : captureAnchor(sc)
   sc.textContent = ''
   // 更早的消息滚动到顶自动加载（无感），不再给用户一个按钮
   if (s.hasMore) sc.appendChild(el('div', 'auto-load-hint', '· 上滑加载更早 ·'))
@@ -954,6 +957,7 @@ function renderChat(s, forceScroll) {
   }
   renderChatPending(s, sc)
   syncLivePill(s)   // 运行中的轮：实时统计 pill（挂在刚刷出来的节点上）
+  if (anchor) restoreAnchor(sc, anchor)
   refreshChatChrome(s)
   scrollBottom(sc, stick)
 }
@@ -1084,7 +1088,22 @@ function focusNote(note) {
   // 兜底：若首次 focus 没生效，下一帧再试（此时已非手势内，只保证光标在位，键盘靠上面那次同步 focus）
   if (document.activeElement !== note) requestAnimationFrame(() => { if (document.activeElement !== note) { try { note.focus({ preventScroll: true }) } catch (e) {} } })
 }
+/* 条目的稳定标识：翻页（loadEarlier）后要按它把视口锚回原位。
+   用事件自带的 id，不用下标（前面插入旧消息后下标会整体位移）。 */
+function itemKey(item) {
+  if (!item) return null
+  if (item.kind === 'user') return item.seq != null ? 'u' + item.seq : (item.rpcId ? 'r' + item.rpcId : null)
+  if (item.kind === 'assistant') return item.seq != null ? 'a' + item.seq : null
+  if (item.kind === 'tool') return item.callId ? 't' + item.callId : null
+  return null
+}
 function itemNode(s, item) {
+  const k = itemKey(item)
+  const node = itemNodeInner(s, item)
+  if (k && node && node.dataset) node.dataset.k = k
+  return node
+}
+function itemNodeInner(s, item) {
   switch (item.kind) {
     case 'user': {
       const m = el('div', 'msg user')
@@ -1809,14 +1828,40 @@ async function loadHistory(s) {
     }
   })
 }
+/* 视口锚点：记住「当前视野里最上面那条内容」+ 它距视口顶的距离。
+   翻页后把它对回原位——比记 scrollHeight 差值稳：① 用户可能在等页面的这几百毫秒里还在滑，
+   锚点必须量在「改 DOM 的前一刻」；② 新页里的图片/代码块高度之后还会变，按元素对位不会漂。 */
+function captureAnchor(sc) {
+  if (!sc) return null
+  for (const n of sc.querySelectorAll('[data-k]')) {
+    const r = n.getBoundingClientRect()
+    if (r.bottom > 0) return { key: n.dataset.k, top: r.top, gap: sc.scrollHeight - sc.scrollTop }
+  }
+  return null
+}
+function restoreAnchor(sc, a) {
+  if (!sc || !a) return
+  a.at = Date.now()
+  sc._anchor = a
+  const node = a.key ? sc.querySelector('[data-k="' + a.key + '"]') : null
+  if (node) { sc.scrollTop += node.getBoundingClientRect().top - a.top; return }   // 同步对位（同一帧内完成，用户看不到中间态）
+  if (a.gap != null) sc.scrollTop = sc.scrollHeight - a.gap                       // 兜底：锚点条目已被换掉
+}
+/* 翻页后新内容里的图片解码撑高会把正在读的位置顶走（不认识宽高的图先按占位高度排版）。
+   2.5s 内按锚点把位移吃掉；用户自己滚动时会刷新锚点期望值，所以不会跟用户抢滚动。 */
+function reanchorAfterLoad(sc) {
+  const a = sc && sc._anchor
+  if (!a || !a.key || Date.now() - (a.at || 0) > 2500) return
+  const n = sc.querySelector('[data-k="' + a.key + '"]')
+  if (!n) return
+  const d = n.getBoundingClientRect().top - a.top
+  if (Math.abs(d) > 1) sc.scrollTop += d
+}
 async function loadEarlier(s) {
   if (s._loadingEarlier) return
   if (s.oldestSeq === null || s.oldestSeq <= 0) return
   s._loadingEarlier = true
   try {
-    // 记录当前视口锚点：插入旧消息后按滚动高度差恢复，避免阅读位置跳变
-    const sc = chatScrollEl()
-    const prevGap = sc ? sc.scrollHeight - sc.scrollTop : 0
     const v = await rpc('session/page', { request: { address: followAddress(s.id), throughSeq: s.oldestSeq - 1, maxMessages: 40 } })
     const older = []
     const tmp = { items: older, callArgs: s.callArgs, live: null, _todoCalls: new Set(), _pendingCalls: [], _thinkBuf: '' }
@@ -1832,10 +1877,12 @@ async function loadEarlier(s) {
     s.hasMore = !!v.hasMore
     if (v.records && v.records.length) {
       const first = v.records[0].event || v.records[0]
-      s.oldestSeq = typeof first.seq === 'number' ? first.seq : s.oldestSeq
-    }
-    renderChat(s)
-    if (sc) sc.scrollTop = sc.scrollHeight - prevGap
+      const seq = typeof first.seq === 'number' ? first.seq : null
+      if (seq != null && seq < s.oldestSeq) s.oldestSeq = seq
+      else s.hasMore = false   // 页码没前进就别再循环拉同一页
+    } else s.hasMore = false
+    renderChat(s)   // 锚点由 renderChat 自己抓/还原（它就在改 DOM 的前后）
+    s._loadedAt = Date.now()
   } finally {
     s._loadingEarlier = false
   }
@@ -3777,17 +3824,22 @@ function buildShell() {
   chatScrollEl().addEventListener('load', (e) => {
     if (!(e.target instanceof HTMLImageElement)) return
     const sc = chatScrollEl()
-    if (sc && S.current && sess(S.current).follow) sc.scrollTop = sc.scrollHeight
+    if (!sc) return
+    if (S.current && sess(S.current).follow) { sc.scrollTop = sc.scrollHeight; return }
+    reanchorAfterLoad(sc)
   }, true)
   $('#chat-scroll').addEventListener('scroll', () => {
     const sc = chatScrollEl()
     if (!sc) return
     if (S.current) sess(S.current).follow = nearBottom(sc)  // 跟随意图：到底 true、离开 false
+    // 用户滚动会刷新锚点期望值：图片补位逻辑就不会把「用户自己滑的距离」当成排版位移补回去
+    if (sc._anchor && sc._anchor.key) { const n = sc.querySelector('[data-k="' + sc._anchor.key + '"]'); if (n) sc._anchor.top = n.getBoundingClientRect().top }
     updateJumpPill()
-    // 滚动到顶部附近：自动加载更早（无感，无按钮）
+    // 滚动到顶部附近：自动加载更早（无感，无按钮）。
+    // 冷却 350ms：一次快速上滑别连着拉好几页（拉完锚点回位后 scrollTop 会离开顶部，冷却只是兜底）
     if (sc.scrollTop < 64 && S.current) {
       const s = sess(S.current)
-      if (s.hasMore && !s._loadingEarlier) loadEarlier(s).catch(() => {})
+      if (s.hasMore && !s._loadingEarlier && Date.now() - (s._loadedAt || 0) > 350) loadEarlier(s).catch(() => {})
     }
   }, { passive: true })
   // 聊天区点击委派：代码块复制 / 链接拉起浏览器 / 图片放大

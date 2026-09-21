@@ -223,7 +223,7 @@ html.light .empty-state .empty-clear { color: var(--info); }
 
 
 /* ============ 对话 ============ */
-.chat-scroll { flex:1; overflow-y:auto; -webkit-overflow-scrolling:touch; padding:14px 12px 12px; display:flex; flex-direction:column; gap:12px; overscroll-behavior:contain; }
+.chat-scroll { flex:1; overflow-y:auto; -webkit-overflow-scrolling:touch; padding:14px 12px 12px; display:flex; flex-direction:column; gap:12px; overscroll-behavior:contain; overflow-anchor:none; }  /* 滚动锚点由 JS 管（翻页按元素对位），关掉浏览器自带补偿免得两套打架 */
 .msg { max-width:min(85%, 660px); display:flex; flex-direction:column; gap:5px; animation:msgin .2s var(--ease-out); }
 @keyframes msgin { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:none; } }
 .msg.user { align-self:flex-end; align-items:flex-end; }
