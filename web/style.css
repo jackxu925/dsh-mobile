@@ -590,6 +590,18 @@ html.light .sheet { box-shadow:0 -12px 44px rgba(15,23,42,.18); }
 .q-flash { animation:qflash 1.6s ease-out; border-radius:15px; }
 @keyframes qflash { 0%,40% { box-shadow:0 0 0 4px rgba(255,159,10,.75); } 100% { box-shadow:0 0 0 0 rgba(255,159,10,0); } }
 /* ---- 任意内容引用：chips 条 + 注解面板 + 气泡内引用块 ---- */
+/* ---- 轮级统计 pill（meta 行内联）---- */
+.stat-pill { display:inline-flex; align-items:center; gap:3px; padding:2px 7px; border-radius:8px; background:var(--bg-card); border:1px solid var(--line); font-size:10px; font-weight:600; color:var(--text-3); font-variant-numeric:tabular-nums; cursor:pointer; }
+.stat-pill:active { background:var(--bg-card-2); }
+.stat-pill .z { color:var(--orange); font-size:9px; }
+.ts-grp { font-size:11px; font-weight:700; color:var(--text-3); padding:10px 2px 5px; }
+.ts-kv { background:var(--bg-card); border:.5px solid var(--line); border-radius:10px; padding:9px 11px; }
+.ts-kv .k { font-size:10.5px; color:var(--text-3); }
+.ts-kv .v { font-size:14px; font-weight:700; margin-top:2px; font-variant-numeric:tabular-nums; }
+.ts-route { display:flex; align-items:center; gap:8px; background:var(--bg-card); border:.5px solid var(--line); border-radius:10px; padding:10px 12px; margin-top:4px; font-size:12.5px; }
+.ts-route .ri { width:22px; height:22px; border-radius:7px; background:var(--accent-soft); color:var(--info); display:flex; align-items:center; justify-content:center; font-size:10px; font-weight:700; flex:none; }
+html.light .stat-pill { background:rgba(15,23,42,.04); }
+
 .quote-strip { display:none; gap:7px; overflow-x:auto; padding:7px 12px 2px; scrollbar-width:none; }
 .quote-strip.show { display:flex; }
 .quote-strip::-webkit-scrollbar { display:none; }

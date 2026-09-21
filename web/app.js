@@ -448,7 +448,7 @@ function foldEvent(s, event, view) {
       // 「只有思考、没有正文」是每个工具步骤前的常态（一轮里能有上百条）：
       // 单独成条会渲染成一排空泡泡，所以先攒着，挂到下一条真正的内容上
       if (!text.trim()) { s._thinkBuf = (s._thinkBuf || '') + reasoning; break }
-      s.items.push({ kind: 'assistant', text, reasoning: takeThinkBuf(s) + reasoning, time: event.time, seq: event.seq, turn: d.turn })
+      s.items.push({ kind: 'assistant', text, reasoning: takeThinkBuf(s) + reasoning, time: event.time, seq: event.seq, turn: d.turn, usage: d.usage || null })
       s.lastPreview = text
       break
     }
@@ -499,9 +499,35 @@ function foldEvent(s, event, view) {
       }
       break
     }
-    case 'turn/start': s.running = true; s._curTurn = d.turn; break
+    case 'turn/start': s.running = true; s._curTurn = d.turn; s._turnStartAt = event.time; break
     case 'turn/end': {
       s.running = false
+      // 轮级统计：turn/start→turn/end 的时长 + 本轮所有 assistant 步的 usage 汇总，挂到最后一条助手消息上
+      const durMs = s._turnStartAt ? Math.max(0, event.time - s._turnStartAt) : 0
+      const curTurn = s._curTurn
+      let agg = null
+      for (let i2 = s.items.length - 1; i2 >= 0; i2--) {
+        const it2 = s.items[i2]
+        if (it2.kind !== 'assistant' || it2.turn !== curTurn) continue
+        if (!agg) {
+          agg = { input: 0, output: 0, total: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, has: false }
+          for (let j = s.items.length - 1; j >= 0; j--) {
+            const aj = s.items[j]
+            if (aj.kind !== 'assistant' || aj.turn !== curTurn || !aj.usage) continue
+            const u = aj.usage
+            agg.input += u.inputTokens || 0
+            agg.output += u.outputTokens || 0
+            agg.total += u.totalTokens || 0
+            agg.cacheRead += u.cacheReadTokens || 0
+            agg.cacheWrite += u.cacheWriteTokens || 0
+            agg.reasoning += u.reasoningTokens || 0
+            agg.has = true
+          }
+        }
+        it2.turnStats = { durMs, agg, turn: curTurn }
+        break   // 只挂本轮最后一条
+      }
+      s._turnStartAt = null
       endLive(s, null, null)
       const r = d.reason || {}
       if (r.kind === 'error') {
@@ -1010,6 +1036,20 @@ function itemNode(s, item) {
       aq.onclick = () => addQuote(s.id, '助手', item.text)
       meta.appendChild(aq)
       if (item.reasoning && item.reasoning.trim()) meta.appendChild(thinkDot(() => openThink({ text: item.reasoning, live: false })))
+      // 轮级统计 pill（P1 方案）：只挂在轮的最后一条助手消息上（turnStats 由 turn/end 计算）
+      if (item.turnStats) {
+        const ts = item.turnStats
+        const dur = ts.durMs > 0 ? (ts.durMs / 1000).toFixed(1) + 's' : '—'
+        const tok = ts.agg && ts.agg.has ? fmtTok(ts.agg.total) : '—'
+        const spd = ts.agg && ts.agg.has && ts.durMs > 0 ? Math.round(ts.agg.output / (ts.durMs / 1000)) + ' t/s' : ''
+        const pill = el('button', 'stat-pill')
+        pill.type = 'button'
+        pill.setAttribute('aria-label', '本轮统计：' + dur + (spd ? ' · ' + spd : '') + ' · ' + tok)
+        pill.appendChild(el('span', 'z', '⚡'))
+        pill.appendChild(document.createTextNode(dur + (spd ? ' · ' + spd : '') + ' · ' + tok))
+        pill.onclick = () => { vibrate(8); openTurnStatsSheet(s, item) }
+        meta.appendChild(pill)
+      }
       // 分叉（移植桌面端「轮尾 branch」语义）：只在已完成的轮次上开放；子代理会话不开放
       if (item.seq != null && !s.subagent && turnComplete(s, item)) {
         const fk = metaIcon('fork', '从这里分叉：复制「到这条回答为止」的历史成新会话')
@@ -2938,6 +2978,38 @@ function showForkConfirm(anchorEl, s, item) {
     }
   }
 }
+/* ---- 轮级统计明细面板 ---- */
+function openTurnStatsSheet(s, item) {
+  const ts = item.turnStats
+  if (!ts) return
+  const agg = ts.agg || {}
+  const durS = ts.durMs > 0 ? (ts.durMs / 1000).toFixed(1) + ' 秒' : '—'
+  const cacheHit = agg.has && agg.total > agg.output ? Math.round(agg.cacheRead / (agg.total - agg.output) * 1000) / 10 + '%' : '—'
+  const speed = agg.has && ts.durMs > 0 ? Math.round(agg.output / (ts.durMs / 1000)) + ' tok/s' : '—'
+  $('#ts-title').textContent = '第 ' + ts.turn + ' 轮统计'
+  const body = $('#ts-body')
+  body.textContent = ''
+  const mk = (label, val) => { const d = el('div', 'ts-kv'); d.appendChild(el('div', 'k', label)); d.appendChild(el('div', 'v', val)); return d }
+  const g1 = el('div', 'ts-grp', '消耗')
+  const grid1 = el('div', 'kv-grid')
+  if (agg.has) {
+    grid1.append(mk('输入（新增）', fmtTok(agg.input)), mk('缓存命中', cacheHit), mk('缓存读取', fmtTok(agg.cacheRead)), mk('输出', fmtTok(agg.output)))
+    if (agg.reasoning > 0) grid1.append(mk('其中思考', fmtTok(agg.reasoning)))
+    if (agg.total > 0) grid1.append(mk('总上下文', fmtTok(agg.total)))
+  } else grid1.append(mk('（无 usage 数据）', '—'))
+  g1.appendChild(grid1)
+  const g2 = el('div', 'ts-grp', '耗时')
+  const grid2 = el('div', 'kv-grid')
+  grid2.append(mk('总时长', durS), mk('速度', speed))
+  g2.appendChild(grid2)
+  const g3 = el('div', 'ts-grp', '模型')
+  const route = el('div', 'ts-route')
+  route.appendChild(el('span', 'ri', 'AI'))
+  route.appendChild(document.createTextNode((s.modelSel && s.modelSel.model) || s.agentPreset || '默认'))
+  g3.appendChild(route)
+  body.append(g1, g2, g3)
+  ovSet('ts-ov', true)
+}
 /* ---- 权限面板 ---- */
 function openPermPanel(s) {
   openSubPanel('perm', '权限', () => renderPermPanel(s))
@@ -3038,6 +3110,8 @@ function renderStatsSection(s, c, noHeader) {
     ['模型调用', ss.steps != null ? String(ss.steps) : '—', ss.steps != null ? '步' : ''],
     ['LLM 时间', fmtDur(ss.llmMs)],
     ['工具时间', fmtDur(ss.toolMs)],
+    ['平均 TTFT', ss.ttftSteps > 0 ? (ss.ttftMs / ss.ttftSteps / 1000).toFixed(1) + 's' : '—'],
+    ['平均速度', ss.decodeMs > 0 ? Math.round(ss.decodeTokens / (ss.decodeMs / 1000)) + ' tok/s' : '—'],
   ]))
 }
 /* 投影统计变更时节流刷新面板 */
@@ -3272,6 +3346,16 @@ function buildShell() {
       <div class="task-body" id="task-body"></div>
     </div>
   </div>
+  <div class="sheet-overlay" id="ts-ov" aria-hidden="true">
+    <div class="sheet q-sheet" role="dialog" aria-label="本轮统计">
+      <div class="grabber"></div>
+      <div class="task-head">
+        <span class="task-title" id="ts-title">本轮统计</span>
+        <button class="think-close" id="ts-close" type="button" aria-label="关闭">✕</button>
+      </div>
+      <div class="sheet-scroll" id="ts-body" style="padding:2px 16px 18px"></div>
+    </div>
+  </div>
   <div class="sheet-overlay" id="quote-ov" aria-hidden="true">
     <div class="sheet q-sheet" role="dialog" aria-label="引用详情">
       <div class="grabber"></div>
@@ -3400,6 +3484,9 @@ function buildShell() {
     sheet.addEventListener('touchend', finish)
     sheet.addEventListener('touchcancel', finish)
   })()
+  // 轮级统计面板：关闭
+  $('#ts-ov').addEventListener('click', (e) => { if (e.target.id === 'ts-ov') ovSet('ts-ov', false) })
+  $('#ts-close').onclick = () => ovSet('ts-ov', false)
   // 引用注解面板：关闭/保存/删除
   $('#quote-ov').addEventListener('click', (e) => { if (e.target.id === 'quote-ov') ovSet('quote-ov', false) })
   $('#quote-close').onclick = () => ovSet('quote-ov', false)
@@ -3644,7 +3731,7 @@ document.addEventListener('keydown', (e) => {
 })
 setInterval(() => { if (S.connState !== 'online') loadBase() }, 15000)
 /* Esc 关闭最上层浮层（多个开着时关最后打开的那个） */
-const OV_CLOSERS = { 'sheet-overlay': closeSheet, 'think-overlay': closeThink, 'task-ov': closeTaskSheet, 'q-ov': closeQSheet, 'sess-ov': closeSessionMenu, 'quote-ov': () => ovSet('quote-ov', false), 'img-viewer': () => ovSet('img-viewer', false) }
+const OV_CLOSERS = { 'sheet-overlay': closeSheet, 'think-overlay': closeThink, 'task-ov': closeTaskSheet, 'q-ov': closeQSheet, 'sess-ov': closeSessionMenu, 'quote-ov': () => ovSet('quote-ov', false), 'ts-ov': () => ovSet('ts-ov', false), 'img-viewer': () => ovSet('img-viewer', false) }
 const ovStack = []
 const ovPush = (id) => { const i = ovStack.indexOf(id); if (i >= 0) ovStack.splice(i, 1); ovStack.push(id) }
 const ovPop = (id) => { const i = ovStack.indexOf(id); if (i >= 0) ovStack.splice(i, 1) }
