@@ -594,6 +594,8 @@ html.light .sheet { box-shadow:0 -12px 44px rgba(15,23,42,.18); }
 .stat-pill { display:inline-flex; align-items:center; gap:3px; padding:2px 7px; border-radius:8px; background:var(--bg-card); border:1px solid var(--line); font-size:10px; font-weight:600; color:var(--text-3); font-variant-numeric:tabular-nums; cursor:pointer; }
 .stat-pill:active { background:var(--bg-card-2); }
 .stat-pill .z { color:var(--orange); font-size:9px; }
+.stat-pill.live { border-color:rgba(255,159,10,.45); color:var(--text-2); }
+.stat-pill.live .z { animation:meta-pulse 1.2s infinite; }   /* 进行中：⚡ 呼吸 */
 .ts-grp { font-size:11px; font-weight:700; color:var(--text-3); padding:10px 2px 5px; }
 .ts-kv { background:var(--bg-card); border:.5px solid var(--line); border-radius:10px; padding:9px 11px; }
 .ts-kv .k { font-size:10.5px; color:var(--text-3); }

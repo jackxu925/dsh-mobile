@@ -460,6 +460,9 @@ function stepTiming(st, event, d) {
 
 function foldEvent(s, event, view) {
   const t = event.type, d = event.data || {}
+  // 最近一次事件时间（宿主时间轴）+ 收到它的本地时刻：实时 pill 靠这对值把本地时钟换算回宿主时钟
+  s._lastEventAt = event.time
+  s._lastEventSeenAt = Date.now()
   // 折叠用的临时会话对象（loadEarlier 的分页缓冲）不一定带全字段，这里惰性补齐
   if (!s._todoCalls) s._todoCalls = new Set()
   if (!s._pendingCalls) s._pendingCalls = []
@@ -588,6 +591,7 @@ function foldEvent(s, event, view) {
       s._step = null
       s._turnTiming = { llmMs: 0, ttftMs: null, ttftStep: null, decodeMs: 0, decodeTokens: 0, hasDecode: false }
       s._turnUsage = null
+      startLiveTicker()
       break
     case 'turn/end': {
       s.running = false
@@ -597,16 +601,28 @@ function foldEvent(s, event, view) {
       const timing = s._turnTiming || null
       const speed = timing && timing.hasDecode && timing.decodeMs > 0 ? timing.decodeTokens / (timing.decodeMs / 1000) : null
       const agg = s._turnUsage || null   // 事件驱动累计：不渲染成气泡的思考步/工具步也算
+      const hadStart = !!s._turnStartAt
+      let hostItem = null
       for (let i2 = s.items.length - 1; i2 >= 0; i2--) {
         const it2 = s.items[i2]
         if (it2.kind !== 'assistant' || it2.turn !== curTurn) continue
         it2.turnStats = { durMs, agg, turn: curTurn, timing, speed }
+        hostItem = it2
         break   // 只挂本轮最后一条
+      }
+      // 轮起点落在加载窗口外（长任务会话）：补回真实起点，总时长不该显示成「—」
+      if (hostItem && !hadStart) {
+        const endAt = event.time
+        backfillTurnStart(s, curTurn, (startAt) => {
+          if (hostItem.turnStats) { hostItem.turnStats.durMs = Math.max(0, endAt - startAt); scheduleRender(s) }
+        })
       }
       s._turnStartAt = null
       s._step = null
       s._turnTiming = null
       s._turnUsage = null
+      stopLiveTicker()
+      syncLivePill(s)   // 收掉实时 pill（正式 pill 由本轮最后一条助手消息承载）
       endLive(s, null, null)
       const r = d.reason || {}
       if (r.kind === 'error') {
@@ -937,6 +953,7 @@ function renderChat(s, forceScroll) {
     sc.appendChild(itemNode(s, item))
   }
   renderChatPending(s, sc)
+  syncLivePill(s)   // 运行中的轮：实时统计 pill（挂在刚刷出来的节点上）
   refreshChatChrome(s)
   scrollBottom(sc, stick)
 }
@@ -1115,6 +1132,7 @@ function itemNode(s, item) {
     }
     case 'assistant': {
       const m = el('div', 'msg bot')
+      if (item.seq != null) m.dataset.seq = String(item.seq)   // 实时 pill 靠它定位「本轮最后一条助手消息」
       const b = el('div', 'bubble')
       b.innerHTML = md(item.text)
       m.appendChild(b)
@@ -1130,17 +1148,12 @@ function itemNode(s, item) {
       aq.onclick = () => quoteNow(s.id, '助手', item.text)
       meta.appendChild(aq)
       if (item.reasoning && item.reasoning.trim()) meta.appendChild(thinkDot(() => openThink({ text: item.reasoning, live: false })))
-      // 轮级统计 pill（P1 方案）：只挂在轮的最后一条助手消息上（turnStats 由 turn/end 计算）
+      // 轮级统计 pill（P1 方案）：只挂在轮的最后一条助手消息上（turnStats 由 turn/end 计算）；
+      // 运行中的轮由 syncLivePill 往同一位置挂实时 pill，轮结束就地换成正式 pill（不跳位）
       if (item.turnStats) {
-        const ts = item.turnStats
-        const dur = ts.durMs > 0 ? (ts.durMs / 1000).toFixed(1) + 's' : '—'
-        const tok = ts.agg && ts.agg.has ? fmtTok(ts.agg.total) : '—'
-        const spd = ts.speed ? Math.round(ts.speed) + ' t/s' : ''   // 解码速度（桌面 tokensPerSecond 同款）；没有解码采样就不显示
         const pill = el('button', 'stat-pill')
         pill.type = 'button'
-        pill.setAttribute('aria-label', '本轮统计：' + dur + (spd ? ' · ' + spd : '') + ' · ' + tok)
-        pill.appendChild(el('span', 'z', '⚡'))
-        pill.appendChild(document.createTextNode(dur + (spd ? ' · ' + spd : '') + ' · ' + tok))
+        fillStatPill(pill, item.turnStats)
         pill.onclick = () => { vibrate(8); openTurnStatsSheet(s, item) }
         meta.appendChild(pill)
       }
@@ -1205,6 +1218,7 @@ function renderLive(s, rebuild) {
   b.textContent = (thinking ? '正在思考…' : '') + text
   b.appendChild(el('span', 'caret'))
   pumpThinkDrawer(s)  // 抽屉开着时实时灌入
+  syncLivePill(s)     // 本轮还没有已结算的助手消息时，实时 pill 挂在直播气泡的 meta 行上
   if (s.follow) scrollBottom(sc, true)
   if (!nearBottom(sc)) showNewMsgPill()  // 用户在翻历史：不打断阅读，提示有新内容
 }
@@ -1750,6 +1764,7 @@ function applyStats(s, values) {
   if (values.contextBreakdown && typeof values.contextBreakdown.messageTokens === 'number') { s.ctxBreakdown = values.contextBreakdown; changed = true }
   if (values.tokenUsage && typeof values.tokenUsage.outputTokens === 'number') { s.tokenUsage = values.tokenUsage; changed = true }
   if (values.sessionStats && typeof values.sessionStats.turns === 'number') { s.sessionStats = values.sessionStats; changed = true }
+  if (Array.isArray(values.turnOutline)) s.turnOutline = values.turnOutline   // 轮起点兜底要用（本轮起始 seq）
   if (changed && S.current === s.id) {
     updateCtxBar(s)
     if (sheetSession === s.id) renderSheetSoon(s)
@@ -2376,6 +2391,117 @@ function fmtDur(ms) {
   const whole = Math.round(s)
   if (whole < 3600) return Math.floor(whole / 60) + ' 分 ' + (whole % 60) + ' 秒'
   return (whole / 3600).toFixed(1) + ' 小时'
+}
+/* pill 里的轮时长：长轮别写成「1560.3s」 */
+function fmtTurnDur(ms) {
+  const s = ms / 1000
+  if (s < 60) return s.toFixed(1) + 's'
+  if (s < 3600) return (s / 60).toFixed(1) + '分'
+  return (s / 3600).toFixed(1) + '小时'
+}
+function turnSpeed(timing) {
+  return timing && timing.hasDecode && timing.decodeMs > 0 ? timing.decodeTokens / (timing.decodeMs / 1000) : null
+}
+/* ---- 运行中的轮：实时统计 pill ---- */
+/* 轮结束时正式 pill 由本轮最后一条助手消息的 meta 行承载，位置与实时 pill 相同，不会跳位 */
+let liveTicker = null
+/* 轮起点兜底：长任务会话里 turn/start 可能落在加载窗口之外——用 turnOutline 给出的本轮起始 seq
+   取一小页事件把轮起点补回来（实时 pill 的时长、轮结束后的总时长都靠它） */
+async function backfillTurnStart(s, turn, onDone) {
+  if (turn == null || s._turnStartFetched === turn) return
+  const list = Array.isArray(s.turnOutline) ? s.turnOutline : null
+  const entry = list ? list.filter((t) => t && t.turn === turn).pop() : null
+  if (!entry || entry.seq == null) return
+  s._turnStartFetched = turn
+  try {
+    const v = await rpc('session/page', { request: { address: followAddress(s.id), throughSeq: entry.seq, maxMessages: 3 } })
+    for (const rec of v.records || []) {
+      const e = rec.event || rec
+      if (!e || e.type !== 'turn/start' || !e.data || e.data.turn !== turn || typeof e.time !== 'number') continue
+      if (s._turnStartAt == null) s._turnStartAt = e.time
+      if (onDone) onDone(e.time)
+      if (S.current === s.id) { syncLivePill(s); scheduleRender(s) }
+      return
+    }
+  } catch (e) {}
+}
+function startLiveTicker() {
+  if (liveTicker) return
+  liveTicker = setInterval(() => {
+    const s = S.current ? sess(S.current) : null
+    if (!s || !s.running) { stopLiveTicker(); return }
+    syncLivePill(s)
+  }, 1000)
+}
+function stopLiveTicker() {
+  if (!liveTicker) return
+  clearInterval(liveTicker)
+  liveTicker = null
+}
+/* 实时读数：时长按客户端时钟走（用 turn/start 时记下的时钟差换算回宿主时间轴），
+   token/速度只在每步结算时前进——和宿主一样，步内没有 usage 可报，不臆造 */
+function hostNow(s) {
+  // 用最近一次事件把本地时钟对齐到宿主时间轴（误差≈网络往返，够实时 pill 走秒）
+  if (s._lastEventSeenAt != null && s._lastEventAt != null) return Date.now() - (s._lastEventSeenAt - s._lastEventAt)
+  return Date.now()
+}
+function liveTurnStats(s, turn) {
+  const now = hostNow(s)
+  const timing = s._turnTiming || null
+  return {
+    live: true,
+    turn: turn != null ? turn : s._curTurn,
+    durMs: s._turnStartAt ? Math.max(0, now - s._turnStartAt) : 0,
+    agg: s._turnUsage || null,
+    timing,
+    speed: turnSpeed(timing),
+  }
+}
+/* 边界兜底：turn/start 落在加载窗口之外时 _curTurn 为空，从已折叠的内容里推出当前轮号
+   （此时拿不到轮起点，时长显示 —，token/速度仍按窗口内已结算的步计算） */
+function inferTurn(s) {
+  for (let i = s.items.length - 1; i >= 0; i--) {
+    const it = s.items[i]
+    if (it.kind === 'assistant' && it.turn != null) return it.turn
+  }
+  return null
+}
+function fillStatPill(pill, ts) {
+  const dur = ts.durMs > 0 ? fmtTurnDur(ts.durMs) : '—'
+  const tok = ts.agg && ts.agg.has ? fmtTok(ts.agg.total) : '—'
+  const spd = ts.speed ? Math.round(ts.speed) + ' t/s' : ''
+  pill.textContent = ''
+  pill.appendChild(el('span', 'z', '⚡'))
+  pill.appendChild(document.createTextNode(dur + (spd ? ' · ' + spd : '') + ' · ' + tok))
+  pill.setAttribute('aria-label', '第 ' + ts.turn + ' 轮' + (ts.live ? '（进行中）' : '') + '统计：' + dur + (spd ? ' · ' + spd : '') + ' · ' + tok)
+}
+function syncLivePill(s) {
+  const sc = chatScrollEl()
+  if (!sc || !s) return
+  const existing = sc.querySelector('.stat-pill.live')
+  const turn = s._curTurn != null ? s._curTurn : (s.running ? inferTurn(s) : null)
+  const on = s.running && turn != null && S.current === s.id
+  if (!on) { if (existing) existing.remove(); return }
+  if (s._turnStartAt == null) backfillTurnStart(s, turn)   // 起点不在窗口里就补一次（不阻塞渲染）
+  startLiveTicker()   // 可能是轮中途打开本页（没收到 turn/start）：这里兜底把「秒针」开起来
+  const ts = liveTurnStats(s, turn)
+  if (existing) {
+    if (existing.dataset.dur !== String(Math.round(ts.durMs / 1000))) { existing.dataset.dur = String(Math.round(ts.durMs / 1000)); fillStatPill(existing, ts) }
+    return
+  }
+  // 挂载点：本轮最后一条助手消息的 meta 行；本轮还没有助手消息就挂到直播气泡上
+  let meta = null
+  for (let i = s.items.length - 1; i >= 0; i--) {
+    const it = s.items[i]
+    if (it.kind === 'assistant' && it.turn === turn && it.seq != null) { meta = sc.querySelector('.msg.bot[data-seq="' + it.seq + '"] .meta-row'); if (meta) break }
+  }
+  if (!meta) { const lb = $('#live-bubble'); meta = lb ? lb.querySelector('.meta-row') : null }
+  if (!meta) return
+  const pill = el('button', 'stat-pill live')
+  pill.type = 'button'
+  fillStatPill(pill, ts)
+  pill.onclick = () => { vibrate(8); openTurnStatsSheet(s, null, liveTurnStats(s, turn)) }
+  meta.appendChild(pill)
 }
 
 /* 断线期间失效的审批/提问：常驻交代条（可关）。输入区上方，与排队条同一视觉语言 */
@@ -3096,9 +3222,9 @@ function showForkConfirm(anchorEl, s, item) {
     }
   }
 }
-/* ---- 轮级统计明细面板 ---- */
-function openTurnStatsSheet(s, item) {
-  const ts = item.turnStats
+/* ---- 轮级统计明细面板（liveTs：运行中的轮，数字随每步结算前进） ---- */
+function openTurnStatsSheet(s, item, liveTs) {
+  const ts = liveTs || (item && item.turnStats)
   if (!ts) return
   const agg = ts.agg || {}
   const tm = ts.timing || {}
@@ -3106,7 +3232,7 @@ function openTurnStatsSheet(s, item) {
   const durS = ts.durMs > 0 ? (ts.durMs / 1000).toFixed(1) + ' 秒' : '—'
   const cacheHit = agg.has && agg.total > agg.output ? Math.round(agg.cacheRead / (agg.total - agg.output) * 1000) / 10 + '%' : '—'
   const speed = ts.speed ? Math.round(ts.speed) + ' tok/s' : '—'   // 解码速度：Σ输出 ÷ Σ解码时长（桌面同款）
-  $('#ts-title').textContent = '第 ' + ts.turn + ' 轮统计'
+  $('#ts-title').textContent = '第 ' + ts.turn + ' 轮统计' + (ts.live ? ' · 进行中' : '')
   const body = $('#ts-body')
   body.textContent = ''
   const mk = (label, val) => { const d = el('div', 'ts-kv'); d.appendChild(el('div', 'k', label)); d.appendChild(el('div', 'v', val)); return d }
@@ -3128,6 +3254,7 @@ function openTurnStatsSheet(s, item) {
   route.appendChild(document.createTextNode((s.modelSel && s.modelSel.model) || s.agentPreset || '默认'))
   g3.appendChild(route)
   body.append(g1, g2, g3)
+  if (ts.live) body.appendChild(el('div', 'sheet-note', '本轮还在跑：时长按秒走；token / 速度每完成一步结算一次（宿主只在步结束时给 usage）。'))
   ovSet('ts-ov', true)
 }
 /* ---- 权限面板 ---- */
