@@ -1860,6 +1860,47 @@ function reanchorAfterLoad(sc) {
   const d = n.getBoundingClientRect().top - a.top
   if (Math.abs(d) > 1) { sc._selfScrollAt = Date.now(); sc.scrollTop += d }
 }
+/* 增量前插：翻页只把新条目的节点插到顶上，不重建整条时间线。
+   窗口大了（几千条）整体重建要几十上百毫秒，上滑时正好被看到——那才是「卡顿」的来源。 */
+function recs0Fallback(v) { const r = (v.records || [])[0]; return r ? (r.event || r) : null }
+function prependItems(s, older, oldFirst) {
+  const sc = chatScrollEl()
+  if (!sc || !older.length) return
+  const frag = document.createDocumentFragment()
+  let lastDay = ''
+  let lastTime = 0
+  for (const item of older) {
+    if (item.time) {
+      const day = new Date(item.time).toDateString()
+      if (day !== lastDay) { lastDay = day; frag.appendChild(el('div', 'day-sep', dayLabel(item.time))) }
+      lastTime = item.time
+    }
+    frag.appendChild(itemNode(s, item))
+  }
+  const hint = sc.querySelector('.auto-load-hint')
+  const at = hint ? hint.nextSibling : sc.firstChild
+  sc.insertBefore(frag, at)
+  // 边界日期分隔：旧内容开头那条分隔若与刚插入的最后一天是同一天，就去掉（否则重复一条）
+  if (at && at.classList && at.classList.contains('day-sep') && oldFirst && oldFirst.time && lastTime &&
+      new Date(oldFirst.time).toDateString() === new Date(lastTime).toDateString()) at.remove()
+  if (!s.hasMore) { const h = sc.querySelector('.auto-load-hint'); if (h) h.remove() }
+}
+/* 上滑预取：别等贴到顶才开始加载（那时才插内容，观感就是「卡一下」）。
+   离顶还有 ~1.5 屏就拉下一页；拉完若还在预取带里就继续补（单次手势最多 8 页，防病态循环）。 */
+let prefetchChain = 0
+function maybeLoadEarlier(s) {
+  const sc = chatScrollEl()
+  if (!sc || !s || S.current !== s.id) return
+  if (!s.hasMore || s._loadingEarlier) return
+  if (sc.scrollTop > sc.clientHeight * 1.5) { prefetchChain = 0; return }
+  if (Date.now() - (s._loadedAt || 0) < 150) return   // 刚插完一页：等布局落定再补下一页
+  if (prefetchChain >= 8) return
+  prefetchChain++
+  loadEarlier(s).then(() => {
+    if (!s.hasMore) { prefetchChain = 0; return }
+    maybeLoadEarlier(s)
+  }).catch(() => { prefetchChain = 0 })
+}
 async function loadEarlier(s) {
   if (s._loadingEarlier) return
   if (s.oldestSeq === null || s.oldestSeq <= 0) return
@@ -1871,20 +1912,32 @@ async function loadEarlier(s) {
     for (const rec of v.records || []) foldEvent(tmp, rec.event || rec)
     // 这一页末尾若停在「只有思考没有正文」的消息上，它属于下一页的第一条内容，补给那个条目
     const dangling = tmp._thinkBuf || ''
+    let patchedHead = null
     if (dangling.trim()) {
       const head = s.items[0]
-      if (head && (head.kind === 'tool' || head.kind === 'assistant')) head.reasoning = dangling + (head.reasoning || '')
+      if (head && (head.kind === 'tool' || head.kind === 'assistant')) { head.reasoning = dangling + (head.reasoning || ''); patchedHead = head }
       else older.push({ kind: 'think', reasoning: dangling })
     }
+    // 量锚点必须在「即将改 DOM」的这一刻（拉页面期间用户可能还在滑）
+    const sc = chatScrollEl()
+    const anchor = captureAnchor(sc)
+    const oldFirst = s.items[0] || null
     s.items = older.concat(s.items)
     s.hasMore = !!v.hasMore
     if (v.records && v.records.length) {
-      const first = v.records[0].event || v.records[0]
-      const seq = typeof first.seq === 'number' ? first.seq : null
+      const first = v.records[0].event || recs0Fallback(v)
+      const seq = first && typeof first.seq === 'number' ? first.seq : null
       if (seq != null && seq < s.oldestSeq) s.oldestSeq = seq
       else s.hasMore = false   // 页码没前进就别再循环拉同一页
     } else s.hasMore = false
-    renderChat(s)   // 锚点由 renderChat 自己抓/还原（它就在改 DOM 的前后）
+    if (older.length) prependItems(s, older, oldFirst)
+    // 被补了思考的那一条要就地换掉（增量前插不会重建它）
+    if (patchedHead) {
+      const k = itemKey(patchedHead)
+      const stale = k ? sc.querySelector('[data-k="' + k + '"]') : null
+      if (stale) stale.replaceWith(itemNode(s, patchedHead))
+    }
+    restoreAnchor(sc, anchor)
     s._loadedAt = Date.now()
   } finally {
     s._loadingEarlier = false
@@ -3344,7 +3397,9 @@ async function jumpToItem(s, ref) {
     (ref.seq == null && ref.time == null && (it.text || '').slice(0, 24) === (ref.text || '').slice(0, 24))
   )
   let guard = 0
-  while (!s.items.some(match) && s.hasMore && guard++ < 50) {
+  while (!s.items.some(match) && s.hasMore && guard++ < 300) {
+    // 预取链上可能正有一页在飞：等它落地，不占翻页名额（loadEarlier 对进行中的拉取是直接返回的）
+    if (s._loadingEarlier) { guard--; await new Promise((r) => setTimeout(r, 100)); continue }
     await loadEarlier(s).catch(() => {})
   }
   if (S.current !== s.id) return
@@ -3999,14 +4054,11 @@ function buildShell() {
     // 用户滚动会刷新锚点期望值：图片补位逻辑就不会把「用户自己滑的距离」当成排版位移补回去
     if (sc._anchor && sc._anchor.key) { const n = sc.querySelector('[data-k="' + sc._anchor.key + '"]'); if (n) sc._anchor.top = n.getBoundingClientRect().top }
     // 用户真的在滑（不是重建后对位/钉底）→ 飘出提问浮层；停手 1.5s 自己淡出
-    if (Date.now() - (sc._selfScrollAt || 0) > 200) qFloatShow()
+    const userScrolled = Date.now() - (sc._selfScrollAt || 0) > 200
+    if (userScrolled) qFloatShow()
     updateJumpPill()
-    // 滚动到顶部附近：自动加载更早（无感，无按钮）。
-    // 冷却 350ms：一次快速上滑别连着拉好几页（拉完锚点回位后 scrollTop 会离开顶部，冷却只是兜底）
-    if (sc.scrollTop < 64 && S.current) {
-      const s = sess(S.current)
-      if (s.hasMore && !s._loadingEarlier && Date.now() - (s._loadedAt || 0) > 350) loadEarlier(s).catch(() => {})
-    }
+    // 上滑预取：离顶还有 ~1.5 屏就开始拉更早的内容（不必等滚到顶），用户手势期间可连续补几页
+    if (userScrolled && S.current) { prefetchChain = 0; maybeLoadEarlier(sess(S.current)) }
   }, { passive: true })
   // 聊天区点击委派：代码块复制 / 链接拉起浏览器 / 图片放大
   $('#chat-scroll').addEventListener('click', (e) => {
