@@ -1494,7 +1494,7 @@ function sessionCard(s, showWs) {
   mkAct('pencil', '改名', 'var(--accent)', () => openSessionMenu(s.id, 0, 0, true))
   mkAct('fork', '分叉', 'var(--purple)', async () => {
     vibrate(8)
-    try { toast('正在分叉…'); const v = await rpc('session/fork', { request: { sessionId: s.id } }); toast('已分叉 ✓'); location.hash = '#/s/' + v.sessionId } catch (e) { toast('分叉失败：' + e.message, true) }
+    try { toast('正在分叉…'); const v = await rpc('session/fork', { request: { sessionId: s.id } }); toast('已分叉 ✓'); location.hash = '#/s/' + v.sessionId; flushForkTail(v.sessionId) } catch (e) { toast('分叉失败：' + e.message, true) }
   })
   if (s.running) mkAct('stop', '停止', 'var(--red)', async () => {
     vibrate(8)
@@ -1617,6 +1617,7 @@ function openSessionMenu(sid, x, y, expandRename) {
       const v = await rpc('session/fork', { request: { sessionId: sid } })
       toast('已分叉 ✓ 正在打开')
       location.hash = '#/s/' + v.sessionId
+      flushForkTail(v.sessionId)
     } catch (e) { toast('分叉失败：' + e.message, true) }
   })
   wire('#sess-a-archive', async () => {
@@ -3519,6 +3520,48 @@ function increasedForkTitle(title) {
   if (full) return full[1] + '（' + (BigInt(full[2]) + 1n) + '）'
   return title + ' (1)'
 }
+/* 宿主 fork 的 cut 是「边界轮 turn/end 之后一直推进到下一个 turn/start」——这会把边界轮之后
+   splice 进 agent 收件箱的下一条提问一并切给子会话，哪怕那一轮早已完成。子会话平时休眠看不见，
+   一旦用户发消息唤醒，agent 会先跑那条旧问题，用户的新消息只能排在后面（即用户报的 bug）。
+   宿主侧没有清收件箱的接口（cancel 不唤醒、updateQueue 只管队列），所以这里主动冲：
+   marker 入队唤醒 → 旧尾巴开跑 → 从队列摘掉 marker → 打断旧轮。子会话时间线会留下那条旧问题 + 「已中断」——
+   它本来就真实存在于子会话的种子里，这样至少用户的新消息能立即被处理。 */
+async function flushForkTail(childId) {
+  try {
+    // 1) 检测：种子（session/end-seed 之前）最后一个 turn/end 之后是否还有 inbox/spliced
+    const l = await rpc('session/list', { _request: { limit: 60 } })
+    const info = (l.items || []).find((x) => x.sessionId === childId)
+    const asOf = info && info.projections && info.projections.asOfSeq
+    if (!asOf) return false
+    const v = await rpc('session/page', { request: { address: { kind: 'session', sessionId: childId }, throughSeq: asOf, maxMessages: 60 } })
+    const recs = (v.records || []).map((r) => r.event || r)
+    const seedEnd = recs.findIndex((e) => e.type === 'session/end-seed')
+    if (seedEnd < 0) return false
+    let lastTurnEnd = -1
+    for (let i = 0; i < seedEnd; i++) if (recs[i].type === 'turn/end') lastTurnEnd = i
+    const inherited = recs.slice(lastTurnEnd + 1, seedEnd + 1).some((e) => e.type === 'agent/inbox/spliced')
+    if (!inherited) return false
+    // 2) marker 入队唤醒（旧尾巴在它前面，marker 不会被先消费）
+    // 注意：队列广播的 source 是空对象（无 requestId），只能按文本认领——所以文本必须够独特
+    const markerText = '（分叉初始化 ' + Date.now().toString(36) + '，请忽略）'
+    await rpc('session/prompt', { request: { requestId: 'fork-flush-' + Date.now(), sessionId: childId, mode: 'queue', content: [{ type: 'text', text: markerText }], clientTimeZone: tz() } })
+    // 3) marker 进队后马上摘掉（它排在旧尾巴后面，摘除窗口足够）
+    for (let i = 0; i < 24; i++) {
+      await new Promise((r) => setTimeout(r, 250))
+      const q = sess(childId).queue || []
+      const it = q.find((x) => textOf(x.message && x.message.content) === markerText)
+      if (it) { await rpc('session/updateQueue', { request: { sessionId: childId, itemId: it.id, action: { kind: 'remove' } } }).catch(() => {}); break }
+    }
+    // 4) 等旧尾巴开跑 → 打断 → 等收工（再跑起来就再打断一次，兜多条尾巴）
+    for (let round = 0; round < 2; round++) {
+      for (let i = 0; i < 40; i++) { await new Promise((r) => setTimeout(r, 250)); if (sess(childId).running) break }
+      if (!sess(childId).running) break
+      await rpc('session/cancel', { request: { sessionId: childId } }).catch(() => {})
+      for (let i = 0; i < 40; i++) { await new Promise((r) => setTimeout(r, 250)); if (!sess(childId).running) break }
+    }
+    return true
+  } catch (e) { return false }
+}
 function showForkConfirm(anchorEl, s, item) {
   const old = document.querySelector('.fork-pop')
   if (old) old.remove()
@@ -3548,6 +3591,7 @@ function showForkConfirm(anchorEl, s, item) {
       toast('已分叉：新会话「' + increasedForkTitle(sessTitle(s)) + '」')
       loadBase()
       location.hash = '#/s/' + childId   // 桌面行为：创建后直接打开
+      flushForkTail(childId)   // 宿主的 cut 会把边界轮之后的收件箱尾巴也切给子会话，冲掉（见函数注释）
     } catch (e) {
       const msg = String((e && e.message) || e)
       toast(/fork-unavailable|not completed|no completed turn/i.test(msg) ? '这一轮还没完成，完成后再分叉' : '分叉失败：' + msg, true)
