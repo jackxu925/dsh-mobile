@@ -97,7 +97,7 @@ const ICONS = {
   wrench: SVG_OPEN + '<path d="M14.7 6.3a4.5 4.5 0 0 0-6 6L3 18l3 3 5.7-5.7a4.5 4.5 0 0 0 6-6L14 13l-3-3 3.7-3.7z"/></svg>',
   trash: SVG_OPEN + '<path d="M4 7h16M9 7V5a1.5 1.5 0 0 1 1.5-1.5h3A1.5 1.5 0 0 1 15 5v2m3 0-.8 12a2 2 0 0 1-2 1.9H8.8a2 2 0 0 1-2-1.9L6 7"/><path d="M10 11v6M14 11v6"/></svg>',
   quote: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 17h3l2-4V7H5v6h3zm8 0h3l2-4V7h-6v6h3z"/></svg>',
-  qlist: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.5 8.5 0 0 1-8.5 8.5c-1.5 0-3-.4-4.2-1.1L3 20l1.1-5.3A8.5 8.5 0 1 1 21 11.5z"/><path d="M9.9 9.2a2.1 2.1 0 1 1 3.5 1.6c-.8.8-1.4 1.2-1.4 2.2"/><circle cx="12" cy="15.8" r=".3" fill="currentColor"/></svg>',
+  qlist: '<svg viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="12" cy="19" r="1.7"/></svg>',   // 微信式竖排三点（问号图标像帮助文档，弃用）
   fork: SVG_OPEN + '<circle cx="6" cy="5" r="2.2"/><circle cx="18" cy="5" r="2.2"/><circle cx="12" cy="19" r="2.2"/><path d="M6 7.2v2a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3v-2M12 12.2v4.6"/></svg>',
   archive: SVG_OPEN + '<rect x="3" y="4" width="18" height="4.5" rx="1.5"/><path d="M5 8.5V19a1.5 1.5 0 0 0 1.5 1.5h11A1.5 1.5 0 0 0 19 19V8.5M10 12.5h4"/></svg>',
   sliders: SVG_OPEN + '<path d="M4 8h16M4 16h16"/><circle cx="9" cy="8" r="2.2"/><circle cx="15" cy="16" r="2.2"/></svg>',
@@ -1901,12 +1901,14 @@ function maybeLoadEarlier(s) {
     maybeLoadEarlier(s)   // 缓冲还没够就继续补（连补不占用新手势名额）
   }).catch(() => { prefetchChain = 0 })
 }
-async function loadEarlier(s) {
+async function loadEarlier(s, opts) {
   if (s._loadingEarlier) return
   if (s.oldestSeq === null || s.oldestSeq <= 0) return
+  const maxMessages = (opts && opts.maxMessages) || 40
+  const render = !(opts && opts.render === false)   // 跳转翻页传 false：只把内容并进 s.items，最后一次性渲染
   s._loadingEarlier = true
   try {
-    const v = await rpc('session/page', { request: { address: followAddress(s.id), throughSeq: s.oldestSeq - 1, maxMessages: 40 } })
+    const v = await rpc('session/page', { request: { address: followAddress(s.id), throughSeq: s.oldestSeq - 1, maxMessages } })
     const older = []
     const tmp = { items: older, callArgs: s.callArgs, live: null, _todoCalls: new Set(), _pendingCalls: [], _thinkBuf: '' }
     for (const rec of v.records || []) foldEvent(tmp, rec.event || rec)
@@ -1919,8 +1921,8 @@ async function loadEarlier(s) {
       else older.push({ kind: 'think', reasoning: dangling })
     }
     // 量锚点必须在「即将改 DOM」的这一刻（拉页面期间用户可能还在滑）
-    const sc = chatScrollEl()
-    const anchor = captureAnchor(sc)
+    const sc = render ? chatScrollEl() : null
+    const anchor = render ? captureAnchor(sc) : null
     const oldFirst = s.items[0] || null
     s.items = older.concat(s.items)
     s.hasMore = !!v.hasMore
@@ -1930,14 +1932,16 @@ async function loadEarlier(s) {
       if (seq != null && seq < s.oldestSeq) s.oldestSeq = seq
       else s.hasMore = false   // 页码没前进就别再循环拉同一页
     } else s.hasMore = false
-    if (older.length) prependItems(s, older, oldFirst)
-    // 被补了思考的那一条要就地换掉（增量前插不会重建它）
-    if (patchedHead) {
-      const k = itemKey(patchedHead)
-      const stale = k ? sc.querySelector('[data-k="' + k + '"]') : null
-      if (stale) stale.replaceWith(itemNode(s, patchedHead))
+    if (render) {
+      if (older.length) prependItems(s, older, oldFirst)
+      // 被补了思考的那一条要就地换掉（增量前插不会重建它）
+      if (patchedHead) {
+        const k = itemKey(patchedHead)
+        const stale = k ? sc.querySelector('[data-k="' + k + '"]') : null
+        if (stale) stale.replaceWith(itemNode(s, patchedHead))
+      }
+      restoreAnchor(sc, anchor)
     }
-    restoreAnchor(sc, anchor)
     s._loadedAt = Date.now()
   } finally {
     s._loadingEarlier = false
@@ -2436,23 +2440,26 @@ function refreshChatChrome(s) {
   const send = $('#send-btn')
   if (send) send.disabled = off
   // 运行状态上移标题栏：副标题「● 正在工作中」+ ⏹ 停止钮（仅运行时），输入框上不再有易误触的运行条
-  const stop = $('#nav-stop')
-  if (stop) {
-    stop.style.display = s.running ? '' : 'none'
-    if (s.running && !stop._wired) {
-      stop._wired = true
-      stop.innerHTML = ''
-      stop.appendChild(icon('stop', 13))
-      stop.onclick = () => { vibrate(8); if (S.current) cancelSession(S.current) }
-    }
-  }
   const sub = $('#chat-sub')
   if (sub) {
     sub.classList.toggle('off', off)
     sub.classList.toggle('running', !off && !!s.running)
     if (off) sub.textContent = '连接已断开，重连中…'
-    else if (s.running) { sub.textContent = ''; sub.appendChild(el('span', 'run-dot')); sub.appendChild(el('span', null, '正在工作中')) }
-    else sub.textContent = s.cwd || ''
+    else if (s.running) {
+      // 正在工作中 · 已运行时长 · 停止钮（停止与时间是一组概念，放一起）
+      sub.textContent = ''
+      sub.appendChild(el('span', 'run-dot'))
+      sub.appendChild(el('span', null, '正在工作中'))
+      sub.appendChild(el('span', 'run-dur', ''))
+      const stop = el('button', 'sub-stop')
+      stop.type = 'button'
+      stop.setAttribute('aria-label', '停止当前任务')
+      stop.appendChild(icon('stop', 10))
+      stop.onclick = () => { vibrate(8); if (S.current) cancelSession(S.current) }
+      sub.appendChild(stop)
+      refreshRunDur(s)
+      ensureRunDurTimer()
+    } else sub.textContent = s.cwd || ''
   }
   updateCtxBar(s)
   renderTaskBar(s)
@@ -2467,6 +2474,26 @@ function refreshChatChrome(s) {
   }
 }
 /* ---- 上下文压力条（标题栏底边 2px） ---- */
+/* 运行中副标题的「已运行时长」：按秒走。轮起点不在窗口里（长任务会话）就补回来再算 */
+let runDurTimer = null
+function refreshRunDur(s) {
+  const el = document.querySelector('#chat-sub .run-dur')
+  if (!el) return
+  if (!s._turnStartAt) {
+    if (s._curTurn != null) backfillTurnStart(s, s._curTurn)
+    el.textContent = ''
+    return
+  }
+  el.textContent = ' · ' + fmtTurnDur(Math.max(0, hostNow(s) - s._turnStartAt))
+}
+function ensureRunDurTimer() {
+  if (runDurTimer) return
+  runDurTimer = setInterval(() => {
+    const s = S.current ? sess(S.current) : null
+    if (!s || !s.running || !document.querySelector('#view-chat.active')) { clearInterval(runDurTimer); runDurTimer = null; return }
+    refreshRunDur(s)
+  }, 1000)
+}
 function updateCtxBar(s) {
   const fill = $('#ctx-fill')
   if (!fill) return
@@ -3022,7 +3049,7 @@ function refreshSheetViews(s) {
   else if (subPanelKind === 'perm') renderPermPanel(s)
   else if (subPanelKind === 'send') renderSendPanel(s)
   else if (subPanelKind === 'stats') renderStatsPanel(s)
-  else if (subPanelKind === 'questions') renderQuestionsPanel(s)
+
 }
 /* 当前模型的展示名（含强度），如「glm-5.3 · Max」 */
 function modelLabel(s) {
@@ -3097,12 +3124,6 @@ function renderSheet(s) {
     const st = todoStats(s)
     c.appendChild(valueRow('任务清单', st.done + '/' + st.total + ' 已完成', st.allDone ? '✓ 全部完成' : '进行中', () => { closeSheet(); openTaskSheet(s) }))
   }
-  // ---- 问过的问题（本对话里用户发过的消息，点击定位回时间线）----
-  // 计数是全量历史（后台算好缓存在 s._qTotal；首次进会话可能还在算，显示 …）
-  if (s._qTotal === undefined) countQuestionsSoon(s)
-  const qCount = s._qTotal !== undefined ? s._qTotal : s.items.filter((i) => i.kind === 'user').length
-  const qVal = s._qTotal === undefined ? '…' : qCount + ' 条'
-  if (qCount > 0 || s.hasMore || s._qTotal === undefined) c.appendChild(valueRow('问过的问题', '本对话里你发过的消息', qVal, () => openQuestionsPanel(s)))
   // ---- 模型 ----
   c.appendChild(valueRow('模型', '切换模型 / 思考强度', modelLabel(s), () => openModelPanel(s)))
   // ---- 权限 ----
@@ -3201,8 +3222,6 @@ function qAcc(s) {
   if (!s._qAcc) s._qAcc = windowQuestions(s)
   return s._qAcc
 }
-/* 后台算全量问题数（首次进会话时触发；面板与菜单共用同一次扫描，结果缓存到 s._qAll / s._qTotal） */
-function countQuestionsSoon(s) { scanQuestions(s) }
 /* 全量扫描：逐页往前翻，每页到达就追加进累加器并通知打开着的面板；完整跑完才缓存为全量 */
 function scanQuestions(s) {
   if (s._qAll) return Promise.resolve({ list: s._qAll, complete: true })
@@ -3246,11 +3265,7 @@ function scanQuestions(s) {
   })().finally(() => { s._qScan = null })
   return s._qScan
 }
-/* ---- 问过的问题面板：最新在上，点击关闭并定位到时间线 ---- */
-let qPanel = null   // 打开着的面板（增量追加 / 收尾改文案用）
-function openQuestionsPanel(s) {
-  openSubPanel('questions', '问过的问题', () => renderQuestionsPanel(s))
-}
+let qPanel = null   // 打开着的提问抽屉（增量追加 / 收尾改文案用）
 function mkQRow(s, it, numEl, close) {
   const row = el('button', 'qrow')
   row.type = 'button'
@@ -3270,7 +3285,7 @@ function buildQuestionList(s, listEl, footEl, close) {
   const acc = qAcc(s)
   const list = el('div', 'q-list')
   const nums = []
-  for (const it of acc.slice().reverse()) {   // 最新在上
+  for (const it of acc) {   // 和对话时间线一致：最旧在上、最新在下（打开停在最新）
     const { row, no } = mkQRow(s, it, '·', close)
     nums.push(no)
     list.appendChild(row)
@@ -3281,15 +3296,12 @@ function buildQuestionList(s, listEl, footEl, close) {
   const label = el('span', null, '')
   foot.append(spin, label)
   ;(footEl || listEl).appendChild(foot)
-  qPanel = { sid: s.id, list, nums, spin, label, total: acc.length, done: !!s._qAll, complete: !!s._qAll, empty: !acc.length && !s.hasMore, close }
+  qPanel = { sid: s.id, list, scroller: listEl, nums, spin, label, total: acc.length, done: !!s._qAll, complete: !!s._qAll, empty: !acc.length && !s.hasMore, close, pinned: true }
   if (s._qAll) qPanelNumber(acc)   // 命中缓存：序号直接给最终值
   qPanelRefreshFoot()
   if (!s._qAll && !qPanel.empty) scanQuestions(s)
-}
-function renderQuestionsPanel(s) {
-  const body = $('#sub-body')
-  if (!body) return
-  buildQuestionList(s, body, null, closeSheet)
+  // 打开就停在最新一条（列表底部）
+  if (listEl.scrollHeight > listEl.clientHeight) listEl.scrollTop = listEl.scrollHeight
 }
 function qPanelRefreshFoot() {
   if (!qPanel) return
@@ -3309,24 +3321,30 @@ function qPanelRefreshFoot() {
 function qPanelAppend(s, freshAsc) {
   // 目标必须是「还活着」的列表：重建/收起后旧容器已脱离 DOM，往它追加没人看得见
   if (!qPanel || qPanel.sid !== s.id || !qPanel.list.isConnected) return
-  for (let i = freshAsc.length - 1; i >= 0; i--) {   // 更早的一页：倒序追加到列表末尾
+  const list = qPanel.list
+  const sc = qPanel.scroller   // 滚动容器（qPanel.list 只是它的内容子节点，不能 scrollTop）
+  const gap = sc.scrollHeight - sc.scrollTop   // 保持视野：往上插内容不把位置顶走
+  for (let i = 0; i < freshAsc.length; i++) {   // 更早的一页：作为一组插到最上面（列表仍是时间线顺序）
     const { row, no } = mkQRow(s, freshAsc[i], '·', qPanel.close)
-    qPanel.nums.push(no)
-    qPanel.list.appendChild(row)
+    qPanel.nums.unshift(no)   // 序号元素同步前插，收尾填号才对得上
+    list.prepend(row)
   }
   qPanel.total += freshAsc.length
+  if (qPanel.pinned) sc.scrollTop = sc.scrollHeight   // 还没开始往上翻读：一直吸在最新一条
+  else sc.scrollTop = sc.scrollHeight - gap           // 已经在读了：视野不动
   qPanelRefreshFoot()
 }
-/* 序号＝从最早数起第几条：全量到位后才填，避免边加载边跳号 */
+/* 序号＝从最早数起第几条：全量到位后才填，避免边加载边跳号（列表是时间线顺序，第 i 行就是第 i+1 条） */
 function qPanelNumber(acc) {
   if (!qPanel) return
-  qPanel.nums.forEach((no, i) => { no.textContent = String(acc.length - i) })
+  qPanel.nums.forEach((no, i) => { no.textContent = String(i + 1) })
 }
 function qPanelDone(s, complete) {
   if (!qPanel || qPanel.sid !== s.id) return
   qPanel.done = true
   qPanel.complete = !!complete
   qPanelNumber(qAcc(s))
+  if (qPanel.pinned) qPanel.scroller.scrollTop = qPanel.scroller.scrollHeight   // 全量落地：吸回最新一条
   qPanelRefreshFoot()
 }
 /* ---- 微信式浮窗把手：藏在右边缘，点开就是完整的提问列表（全量，不只是当前屏） ---- */
@@ -3338,8 +3356,12 @@ function openQDrawer() {
   d.classList.add('open'); d.setAttribute('aria-hidden', 'false')
   scrim.classList.add('open')
   h.setAttribute('aria-expanded', 'true'); h.classList.add('hidden')
-  buildQuestionList(s, $('#qd-list'), $('#qd-foot'), closeQDrawer)
-  $('#qd-list').scrollTop = 0
+  buildQuestionList(s, $('#qd-list'), $('#qd-foot'), closeQDrawer)   // 渲染内部会把滚动停在最新一条（列表底部）
+  const ql = $('#qd-list')
+  if (ql && !ql._pinWired) {
+    ql._pinWired = true
+    ql.addEventListener('scroll', () => { if (qPanel && qPanel.list === ql.querySelector('.q-list')) qPanel.pinned = ql.scrollHeight - ql.scrollTop - ql.clientHeight < 40 }, { passive: true })
+  }
 }
 function closeQDrawer() {
   qPanel = null   // 抽屉的列表容器卸载了，别再往它追加
@@ -3357,23 +3379,13 @@ async function jumpToItem(s, ref) {
     (ref.seq == null && ref.time != null && it.time === ref.time) ||
     (ref.seq == null && ref.time == null && (it.text || '').slice(0, 24) === (ref.text || '').slice(0, 24))
   )
-  let guard = 0
-  while (!s.items.some(match) && s.hasMore && guard++ < 300) {
-    // 预取链上可能正有一页在飞：等它落地，不占翻页名额（loadEarlier 对进行中的拉取是直接返回的）
-    if (s._loadingEarlier) { guard--; await new Promise((r) => setTimeout(r, 100)); continue }
-    await loadEarlier(s).catch(() => {})
-  }
-  if (S.current !== s.id) return
-  const item = s.items.find(match) || ref
-  // 跳转=用户要看历史：置 follow=false，否则运行中的会话会在下一次渲染时被重新拽回底部；
-  // 并且必须用瞬时定位（smooth 动画会被 80ms 一轮的重建销毁目标节点而中断）
-  s.follow = false
-  renderChat(s)
-  const key = item.rpcId || item.time
-  let node = null
+  s.follow = false   // 跳转=看历史：置 follow=false，运行中的会话不会在下一次渲染时把位置拽回底部
   const sc = chatScrollEl()
-  if (sc) {
-    node = sc.querySelector('[data-q="' + key + '"]')
+  const locate = () => {
+    const item = s.items.find(match)
+    if (!item || !sc) return null
+    const key = item.rpcId || item.time
+    let node = key ? sc.querySelector('[data-q="' + key + '"]') : null
     if (!node) {
       // 兜底：按文本+类型找（rpcId/time 都可能有极端重复）
       const want = (item.text || '').slice(0, 24)
@@ -3381,9 +3393,26 @@ async function jumpToItem(s, ref) {
         if (want && n.textContent.slice(0, 24) === want) { node = n.closest('.msg'); break }
       }
     }
+    return node
+  }
+  if (S.current !== s.id) return
+  // 已在窗口里：直接定位，别整条重建——大会话下重建要几十上百毫秒，这就是「点完要等一会」的根因
+  let node = locate()
+  if (!node && s.items.some(match)) { renderChat(s); node = locate() }   // DOM 还没刷出来：补一次重建再找
+  if (!node) {
+    // 不在窗口：往前翻页找，找到后一次性重建再定位
+    let guard = 0
+    while (!s.items.some(match) && s.hasMore && guard++ < 300) {
+      // 预取链上可能正有一页在飞：等它落地，不占翻页名额
+      if (s._loadingEarlier) { guard--; await new Promise((r) => setTimeout(r, 100)); continue }
+      await loadEarlier(s, { maxMessages: 200, render: false }).catch(() => {})   // 跳转只要数据：大页、不逐页渲染，找到再一次性渲染
+    }
+    if (S.current !== s.id) return
+    renderChat(s)
+    node = locate()
   }
   if (!node) return
-  node.scrollIntoView({ block: 'center', behavior: 'auto' })
+  node.scrollIntoView({ block: 'center', behavior: 'auto' })   // 必须瞬时定位（smooth 动画会被 80ms 一轮的重建销毁目标节点而中断）
   node.classList.remove('q-flash')
   void node.offsetWidth
   node.classList.add('q-flash')
@@ -3734,7 +3763,6 @@ function buildShell() {
     <div class="navbar"><div class="bar">
       <button class="nav-btn back" id="chat-back" aria-label="返回"><span class="ic-slot" data-ic="back"></span></button>
       <div class="title"><span id="chat-title"></span><div class="subtitle" id="chat-sub"></div></div>
-      <button class="nav-stop" id="nav-stop" type="button" aria-label="停止当前任务" style="display:none"></button>
       <button class="nav-btn" id="chat-more" aria-label="会话设置"><span class="ic-slot" data-ic="more"></span></button>
       <div class="ctx-bar" aria-hidden="true"><div class="ctx-fill" id="ctx-fill"></div></div>
     </div></div>

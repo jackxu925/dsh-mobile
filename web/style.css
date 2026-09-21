@@ -431,11 +431,11 @@ html.light .tool-trunc { color:#9a4a06; }
 .attach-thumb img { width:56px; height:56px; object-fit:cover; border-radius:10px; display:block; }
 /* ---- 触控热区：小控件用透明 ::after 扩到 ≥44px，不改视觉尺寸 ---- */
 .attach-thumb .rm, .tool-head .meta-ico.think, .code-copy, .cmd-more, .think-close, .meta-ico,
-.nav-stop, .seg-btn, .todo-chip, .c-btn, .composer .send, .tool-copy2, .st-x { position:relative; }
+.seg-btn, .todo-chip, .c-btn, .composer .send, .tool-copy2, .st-x { position:relative; }
 .attach-thumb .rm::after { content:''; position:absolute; inset:-12px; }
 .tool-head .meta-ico.think::after { content:''; position:absolute; inset:-9px; }
 .code-copy::after, .cmd-more::after, .think-close::after, .meta-ico::after { content:''; position:absolute; inset:-8px; }
-.nav-stop::after, .seg-btn::after { content:''; position:absolute; inset:-5px; }
+.seg-btn::after { content:''; position:absolute; inset:-5px; }
 .todo-chip::after, .c-btn::after, .composer .send::after { content:''; position:absolute; inset:-3px; }
 .tool-copy2::after { content:''; position:absolute; inset:-4px; }
 .st-x::after { content:''; position:absolute; inset:-4px; }
@@ -784,11 +784,13 @@ html.light .tk-row.now { background:rgba(59,130,246,.09); }
 .ic-slot svg { display:block; }
 .fab svg { width:24px; height:24px; }
 /* 标题栏运行态 + 停止钮 */
-.subtitle.running { color:var(--info); display:flex; align-items:center; gap:5px; }
+.subtitle.running { color:var(--info); display:flex; align-items:center; gap:5px; overflow:visible; }
+.subtitle .run-dur { color:var(--text-3); font-variant-numeric:tabular-nums; }
+.sub-stop { flex:none; position:relative; width:22px; height:22px; border-radius:50%; border:1px solid rgba(255,69,58,.5); background:rgba(255,69,58,.12); color:var(--red); display:flex; align-items:center; justify-content:center; margin-left:2px; cursor:pointer; }
+.sub-stop::after { content:''; position:absolute; inset:-10px; }   /* 扩大可点热区 */
+.sub-stop:active { transform:scale(.88); }
 .run-dot { width:6px; height:6px; border-radius:50%; background:var(--info); animation:meta-pulse 1.4s infinite; flex:none; }
 @keyframes meta-pulse { 50% { opacity:.25 } }
-.nav-stop { width:33px; height:33px; flex:none; border-radius:50%; border:1px solid rgba(255,69,58,.5); background:rgba(255,69,58,.12); color:var(--red); display:flex; align-items:center; justify-content:center; }
-.nav-stop:active { transform:scale(.88); }
 /* meta 行：时间 · 复制 · 思考 */
 .meta-row { display:flex; align-items:center; gap:2px; padding:0 4px; min-height:30px; }
 .msg.user .meta-row { flex-direction:row-reverse; }
@@ -907,4 +909,3 @@ html.light .stale-strip .st-x { background:rgba(154,74,6,.12); }
 /* ⋯ 和返回钮 40→44px（iOS HIG 最小命中区）；停止钮与 ⋯ 之间拉开 */
 .nav-btn { min-width:44px; height:44px; }
 .navbar .bar { gap:4px; }
-.nav-stop { width:34px; height:34px; margin-right:4px; }
