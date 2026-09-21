@@ -1205,9 +1205,10 @@ function initSwipe(wrap, card, actions) {
   card.addEventListener('touchmove', (e) => {
     const mx = e.touches[0].clientX - sx, my = e.touches[0].clientY - sy
     if (!decided) {
-      if (Math.abs(mx) < 8 && Math.abs(my) < 8) return
+      if (Math.abs(mx) < 12 && Math.abs(my) < 12) return
       decided = true
-      dragging = Math.abs(mx) > Math.abs(my) * 1.2 && mx < 0 || (swipeState.openWrap === wrap && Math.abs(mx) > Math.abs(my))
+      // 严格方向锁：横向优势 1.5 倍且确有 12px 左移才算左滑；斜向拇指滚动不再把卡片拖歪
+      dragging = (mx < -12 && Math.abs(mx) > Math.abs(my) * 1.5) || (swipeState.openWrap === wrap && Math.abs(mx) > 12 && Math.abs(mx) > Math.abs(my) * 1.2)
       if (dragging) { wrap.classList.add('dragging'); if (swipeState.openWrap && swipeState.openWrap !== wrap) closeSwipe() }
     }
     if (!dragging) return
@@ -2986,6 +2987,12 @@ function buildShell() {
   gh('#new-input-h', 'chat', '说点什么开始（可留空）')
   $('#search').addEventListener('input', renderList)
   // 列表视图切换：最近活跃平铺 / 按工作区分组
+  // 列表一滚就收起左滑操作（iOS Mail 同款）：滚动中不再有横在半路的卡片
+  const listScroll = $('#list-scroll')
+  if (listScroll && !listScroll._swipeClose) {
+    listScroll._swipeClose = true
+    listScroll.addEventListener('scroll', () => closeSwipe(), { passive: true })
+  }
   document.querySelectorAll('.seg-btn').forEach((b) => {
     b.onclick = () => {
       if (S.listMode === b.dataset.mode) return

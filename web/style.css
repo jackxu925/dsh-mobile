@@ -118,7 +118,9 @@ button, .session-card, .tool-head, .sheet-row, .tab, .pick-ws, .ask-opt, .chip, 
 .conn-pill.off .dot { background:var(--red); box-shadow:0 0 6px var(--red); }
 
 /* ============ 会话列表 ============ */
-.scroll { flex:1; overflow-y:auto; -webkit-overflow-scrolling:touch; overscroll-behavior:contain; }
+.scroll { flex:1; overflow-y:auto; overflow-x:hidden; -webkit-overflow-scrolling:touch; overscroll-behavior:contain; }
+/* 列表/新会话页只允许纵向滚动：横向交给左滑操作，容器本身不再横向橡皮筋（修「列表歪歪扭扭」） */
+#list-scroll, #view-new .scroll { touch-action: pan-y; overscroll-behavior-x: none; }
 .search-wrap { padding: 10px 16px 4px; max-width: 780px; margin: 0 auto; width: 100%; }
 .search {
   width:100%; height:38px; border:none; outline:none;
@@ -785,7 +787,9 @@ html.light .stale-strip .st-x { background:rgba(154,74,6,.12); }
 .sess-menu-title { padding:2px 20px 8px; font-size:15px; font-weight:700; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text); }
 
 /* ============ 会话卡左滑操作（iOS Mail 式） ============ */
-.swipe-wrap { position:relative; overflow:hidden; margin:0 12px 10px; border-radius:18px; }
+.swipe-wrap { position:relative; overflow:hidden; margin:0 12px 10px; border-radius:18px; touch-action: pan-y; }
+/* touch-action:pan-y——纵向滚动归浏览器（滚了就 touchcancel、卡片弹回原位），横向手势归 JS（左滑出操作）；
+   方向仲裁交给系统，不再靠 8px 阈值抢判，斜向滚动不会再把卡片拖歪 */
 .swipe-actions { position:absolute; top:0; right:0; bottom:0; display:flex; border-radius:18px; overflow:hidden; }
 .swipe-act {
   width:58px; border:none; color:#fff; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px;
