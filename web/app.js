@@ -307,6 +307,7 @@ function sess(id) {
       _thinkBuf: '',                   // 攒着「只有思考没有正文」的 assistant 消息，挂到下一条内容上
       _todoTimer: null,                // 全部完成后自动收起的定时器
       _todoCollapsed: false,           // 任务条是否已收成一条细线
+      follow: true,                  // 用户想在底部（被顶离也会恢复跟随）；主动上滑才置 false
       _resolveLoad: null,              // loadHistory 的快照到达回调
     }
     S.sessions.set(id, s)
@@ -345,15 +346,22 @@ function attachImgEl(s, ref) {
   img.alt = '图片'
   img.loading = 'lazy'
   const cached = attachCache.get(ref.attachmentId)
-  if (cached) { img.src = cached; return img }
-  img.style.background = 'var(--bg-card-2)'
-  img.style.minHeight = '80px'
+  const ar = ref.ar || (cached && cached.ar)
+  if (ar) img.style.aspectRatio = ar  // 首次加载后记住宽高比：之后每次重建都零跳变
+  if (cached) { img.src = cached.url; return img }
+  if (!ar) { img.style.background = 'var(--bg-card-2)'; img.style.minHeight = '80px' }
   rpc('session/attachment', { request: { sessionId: s.id, attachmentId: ref.attachmentId } })
     .then((v) => {
       const url = 'data:' + (v.attachment.mediaType || ref.mediaType) + ';base64,' + v.data
-      attachCache.set(ref.attachmentId, url)
-      img.src = url
+      attachCache.set(ref.attachmentId, { url })
       img.style.minHeight = ''
+      img.onload = () => {
+        if (img.naturalWidth) {
+          ref.ar = img.naturalWidth + ' / ' + img.naturalHeight
+          attachCache.set(ref.attachmentId, { url, ar: ref.ar })
+        }
+      }
+      img.src = url
     })
     .catch(() => {
       // 失败不静默移除：留下可重试的占位，避免消息「少了一块」而用户无感知
@@ -377,13 +385,15 @@ function fileToImage(file) {
           const maxSide = 1600
           const scale = Math.min(1, maxSide / Math.max(img.width, img.height))
           let dataUrl = reader.result, mediaType = file.type
+          let outW = img.width, outH = img.height
           if (scale < 1 || file.size > 4.5 * 1024 * 1024) {
             const cv = document.createElement('canvas')
             cv.width = Math.round(img.width * scale); cv.height = Math.round(img.height * scale)
             cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height)
             dataUrl = cv.toDataURL('image/jpeg', 0.82); mediaType = 'image/jpeg'
+            outW = cv.width; outH = cv.height
           }
-          resolve({ mediaType, data: String(dataUrl).split(',')[1], previewUrl: dataUrl, name: file.name || 'image' })
+          resolve({ mediaType, data: String(dataUrl).split(',')[1], previewUrl: dataUrl, name: file.name || 'image', width: outW, height: outH })
         } catch (e) { reject(e) }
       }
       img.onerror = () => reject(new Error('图片解析失败'))
@@ -415,7 +425,10 @@ function foldEvent(s, event, view) {
       if (rid) {
         const i = s.items.findIndex((x) => x.kind === 'user' && x.rpcId === rid)
         if (i >= 0) {
-          s.items[i] = { ...s.items[i], text: text || s.items[i].text, images: images.length ? images : s.items[i].images, pending: false, failed: false, time: event.time }
+          // 转正合并：乐观图片（本地 dataURL + 压缩时已知的宽高比）优先于事件折叠块
+          //（折叠块只剩 attachmentId，换了会丢掉尺寸占位、回到 80px 占位再撑开的老路）
+          const keepImgs = (s.items[i].images && s.items[i].images.length) ? s.items[i].images : (images.length ? images : null)
+          s.items[i] = { ...s.items[i], text: text || s.items[i].text, images: keepImgs, pending: false, failed: false, time: event.time }
           s.lastPreview = text || s.lastPreview
           break
         }
@@ -742,6 +755,7 @@ function nearBottom(sc) { return sc.scrollHeight - sc.scrollTop - sc.clientHeigh
  * 下一帧再确认一次；用户一旦主动上滑（gap 超 Threshold）立即放弃，不抢滚动权 */
 function scrollBottom(sc, force) {
   if (!(force || nearBottom(sc))) return
+  sc._lastStick = Date.now()
   sc.scrollTop = sc.scrollHeight
   requestAnimationFrame(() => {
     if (Math.abs(sc.scrollHeight - sc.scrollTop - sc.clientHeight) < 160) sc.scrollTop = sc.scrollHeight
@@ -796,7 +810,9 @@ function renderChat(s, forceScroll) {
   if (S.current !== s.id) return
   const sc = chatScrollEl()
   if (!sc) return
-  const stick = nearBottom(sc) || forceScroll
+  // 钉不钉看「用户意图」而不是此刻位置：图片撑开/内容抖动造成的瞬时脱底不该永久取消跟随；
+  // 只有用户真的上滑（scroll 事件里 gap 超阈值）才置 follow=false
+  const stick = forceScroll || s.follow
   sc.textContent = ''
   // 更早的消息滚动到顶自动加载（无感），不再给用户一个按钮
   if (s.hasMore) sc.appendChild(el('div', 'auto-load-hint', '· 上滑加载更早 ·'))
@@ -835,7 +851,13 @@ function itemNode(s, item) {
       const b = el('div', 'bubble' + (item.pending ? ' pending' : '') + (item.failed ? ' failed' : ''))
       if (item.text) b.innerHTML = linkifyText(item.text)  // 裸 URL 可点；换行由 pre-wrap 保留
       if (item.images) for (const img of item.images) {
-        if (img.previewUrl) { const im = el('img', 'msg-img'); im.src = im.previewUrl || img.previewUrl; im.alt = img.name || '图片'; b.appendChild(im) }
+        if (img.previewUrl) {
+          const im = el('img', 'msg-img')
+          im.src = im.previewUrl
+          im.alt = img.name || '图片'
+          if (img.width && img.height) im.style.aspectRatio = img.width + ' / ' + img.height  // 解码前即占位，杜绝撑开顶人
+          b.appendChild(im)
+        }
         else if (img.attachmentId) b.appendChild(attachImgEl(s, img))
       }
       m.appendChild(b)
@@ -918,7 +940,7 @@ function renderLive(s, rebuild) {
   b.textContent = (thinking ? '正在思考…' : '') + text
   b.appendChild(el('span', 'caret'))
   pumpThinkDrawer(s)  // 抽屉开着时实时灌入
-  scrollBottom(sc)
+  if (s.follow) scrollBottom(sc, true)
   if (!nearBottom(sc)) showNewMsgPill()  // 用户在翻历史：不打断阅读，提示有新内容
 }
 /* meta 行通用小图标钮（复制等） */
@@ -2380,6 +2402,7 @@ async function sendPrompt(id, text, images, forceMode, reuseRpcId) {
   s.items.push(item)
   s.updatedAt = Date.now()
   s.lastPreview = text || '[图片]'
+  s.follow = true  // 自己发消息：必然想看到最新
   if (S.current === id) renderChat(s, true)
   renderListSoon()
   const content = []
@@ -3094,9 +3117,16 @@ function buildShell() {
     if (S.current) sess(S.current)._newBelow = false
     updateJumpPill()
   })
+  // 图片解码后高度撑开会改变滚动几何：若 2.5s 内刚做过钉底决策，补钉一次（load 不冒泡，必须 capture）
+  chatScrollEl().addEventListener('load', (e) => {
+    if (!(e.target instanceof HTMLImageElement)) return
+    const sc = chatScrollEl()
+    if (sc && S.current && sess(S.current).follow) sc.scrollTop = sc.scrollHeight
+  }, true)
   $('#chat-scroll').addEventListener('scroll', () => {
     const sc = chatScrollEl()
     if (!sc) return
+    if (S.current) sess(S.current).follow = nearBottom(sc)  // 跟随意图：到底 true、离开 false
     updateJumpPill()
     // 滚动到顶部附近：自动加载更早（无感，无按钮）
     if (sc.scrollTop < 64 && S.current) {
@@ -3303,5 +3333,5 @@ document.addEventListener('keydown', (e) => {
 })
 /* 调试/端到端验证钩子：真实验证需要触达闭包内部（如主动断开 WS 走真实重连路径）。
    页面脚本本就同源同权，不构成新的暴露面。 */
-try { window.__dsh = { S, Mux, sess } } catch (e) {}
+try { window.__dsh = { S, Mux, sess, renderChat, chatScrollEl, nearBottom } } catch (e) {}
 })()
