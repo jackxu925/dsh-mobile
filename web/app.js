@@ -97,6 +97,7 @@ const ICONS = {
   wrench: SVG_OPEN + '<path d="M14.7 6.3a4.5 4.5 0 0 0-6 6L3 18l3 3 5.7-5.7a4.5 4.5 0 0 0 6-6L14 13l-3-3 3.7-3.7z"/></svg>',
   trash: SVG_OPEN + '<path d="M4 7h16M9 7V5a1.5 1.5 0 0 1 1.5-1.5h3A1.5 1.5 0 0 1 15 5v2m3 0-.8 12a2 2 0 0 1-2 1.9H8.8a2 2 0 0 1-2-1.9L6 7"/><path d="M10 11v6M14 11v6"/></svg>',
   quote: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 17h3l2-4V7H5v6h3zm8 0h3l2-4V7h-6v6h3z"/></svg>',
+  qlist: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.5 8.5 0 0 1-8.5 8.5c-1.5 0-3-.4-4.2-1.1L3 20l1.1-5.3A8.5 8.5 0 1 1 21 11.5z"/><path d="M9.9 9.2a2.1 2.1 0 1 1 3.5 1.6c-.8.8-1.4 1.2-1.4 2.2"/><circle cx="12" cy="15.8" r=".3" fill="currentColor"/></svg>',
   fork: SVG_OPEN + '<circle cx="6" cy="5" r="2.2"/><circle cx="18" cy="5" r="2.2"/><circle cx="12" cy="19" r="2.2"/><path d="M6 7.2v2a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3v-2M12 12.2v4.6"/></svg>',
   archive: SVG_OPEN + '<rect x="3" y="4" width="18" height="4.5" rx="1.5"/><path d="M5 8.5V19a1.5 1.5 0 0 0 1.5 1.5h11A1.5 1.5 0 0 0 19 19V8.5M10 12.5h4"/></svg>',
   sliders: SVG_OPEN + '<path d="M4 8h16M4 16h16"/><circle cx="9" cy="8" r="2.2"/><circle cx="15" cy="16" r="2.2"/></svg>',
@@ -2349,7 +2350,7 @@ function enterChat() {
   v.style.transform = ''
 }
 function leaveChat() {
-  qFloatHide()
+  closeQDrawer()
   const v = chatView()
   if (!v || !v.classList.contains('active')) return
   v.classList.add('closing')
@@ -2395,7 +2396,7 @@ async function openSession(id, force) {
   $('#chat-title').textContent = sessTitle(s)
   showView('chat')
   s._newBelow = false
-  qFloatHide()
+  closeQDrawer()
   hideNewMsgPill()
   const sc = chatScrollEl()
   sc.textContent = ''
@@ -3250,7 +3251,7 @@ let qPanel = null   // 打开着的面板（增量追加 / 收尾改文案用）
 function openQuestionsPanel(s) {
   openSubPanel('questions', '问过的问题', () => renderQuestionsPanel(s))
 }
-function mkQRow(s, it, numEl) {
+function mkQRow(s, it, numEl, close) {
   const row = el('button', 'qrow')
   row.type = 'button'
   const no = el('span', 'qi', numEl)
@@ -3258,32 +3259,37 @@ function mkQRow(s, it, numEl) {
   // 日期 + 时间：跨天/跨年的问题也能一眼分辨
   const tm = el('span', 'qm', fmtTime(it.time))   // fmtTime 自带 今天/昨天/M月D日/[年份] 分层
   row.append(no, txt, tm)
-  row.onclick = () => { vibrate(8); closeSheet(); jumpToItem(s, it) }
+  row.onclick = () => { vibrate(8); close(); jumpToItem(s, it) }
   return { row, no }
 }
-function renderQuestionsPanel(s) {
-  const body = $('#sub-body')
-  if (!body) return
-  qPanel = null
-  body.textContent = ''
+/* 把问题列表渲染进给定容器（⋯ 子面板 / 微信式浮窗抽屉共用）：
+   立即出当前已知的，扫描在后台继续，扫到一页就追加一页 */
+function buildQuestionList(s, listEl, footEl, close) {
+  listEl.textContent = ''
+  if (footEl && footEl !== listEl) footEl.textContent = ''
   const acc = qAcc(s)
   const list = el('div', 'q-list')
   const nums = []
   for (const it of acc.slice().reverse()) {   // 最新在上
-    const { row, no } = mkQRow(s, it, '·')
+    const { row, no } = mkQRow(s, it, '·', close)
     nums.push(no)
     list.appendChild(row)
   }
-  if (acc.length) body.appendChild(list)
+  if (acc.length) listEl.appendChild(list)
   const foot = el('div', 'q-foot')
   const spin = el('span', 'q-spin')
   const label = el('span', null, '')
   foot.append(spin, label)
-  body.appendChild(foot)
-  qPanel = { sid: s.id, list, nums, spin, label, total: acc.length, done: !!s._qAll, complete: !!s._qAll, empty: !acc.length && !s.hasMore }
+  ;(footEl || listEl).appendChild(foot)
+  qPanel = { sid: s.id, list, nums, spin, label, total: acc.length, done: !!s._qAll, complete: !!s._qAll, empty: !acc.length && !s.hasMore, close }
   if (s._qAll) qPanelNumber(acc)   // 命中缓存：序号直接给最终值
   qPanelRefreshFoot()
   if (!s._qAll && !qPanel.empty) scanQuestions(s)
+}
+function renderQuestionsPanel(s) {
+  const body = $('#sub-body')
+  if (!body) return
+  buildQuestionList(s, body, null, closeSheet)
 }
 function qPanelRefreshFoot() {
   if (!qPanel) return
@@ -3301,9 +3307,10 @@ function qPanelRefreshFoot() {
   }
 }
 function qPanelAppend(s, freshAsc) {
-  if (!qPanel || qPanel.sid !== s.id || subPanelKind !== 'questions') return
+  // 目标必须是「还活着」的列表：重建/收起后旧容器已脱离 DOM，往它追加没人看得见
+  if (!qPanel || qPanel.sid !== s.id || !qPanel.list.isConnected) return
   for (let i = freshAsc.length - 1; i >= 0; i--) {   // 更早的一页：倒序追加到列表末尾
-    const { row, no } = mkQRow(s, freshAsc[i], '·')
+    const { row, no } = mkQRow(s, freshAsc[i], '·', qPanel.close)
     qPanel.nums.push(no)
     qPanel.list.appendChild(row)
   }
@@ -3322,70 +3329,25 @@ function qPanelDone(s, complete) {
   qPanelNumber(qAcc(s))
   qPanelRefreshFoot()
 }
-/* ---- 滑动时飘出的「问过的问题」浮层：滑动中出现，停手 1.5s 淡出，点一条直接跳 ---- */
-let qFloatTimer = null   // 淡出计时
-let qFloatSig = ''       // 最近一次渲染的行集合：没变就不重建 DOM
-function qFloatHide() {
-  const box = $('#q-float')
-  if (box) { box.classList.remove('show'); box.setAttribute('aria-hidden', 'true') }
-}
-function qFloatHideSoon() {
-  if (qFloatTimer) clearTimeout(qFloatTimer)
-  qFloatTimer = setTimeout(() => { qFloatTimer = null; qFloatHide() }, 1500)
-}
-function qFloatCancelHide() { if (qFloatTimer) { clearTimeout(qFloatTimer); qFloatTimer = null } }
-/* 列出「当前滚动位置附近」那几个提问（用已渲染的 DOM 定位，跳转零等待）。
-   节流 120ms：惯性滚动期间每秒几十个 scroll 事件，不必每个都重排。 */
-function qFloatShow(force) {
+/* ---- 微信式浮窗把手：藏在右边缘，点开就是完整的提问列表（全量，不只是当前屏） ---- */
+function openQDrawer() {
   const s = S.current ? sess(S.current) : null
-  const sc = chatScrollEl()
-  const box = $('#q-float')
-  const list = $('#qf-list')
-  if (!s || !sc || !box || !list) return
-  const nodes = Array.from(sc.querySelectorAll('.msg.user'))
-  const now = Date.now()
-  if (!force && now - (qFloatShow._at || 0) < 120) { qFloatHideSoon(); return }
-  qFloatShow._at = now
-  if (nodes.length < 2) { qFloatHide(); return }   // 只有一两条提问：不值得飘
-  const scRect = sc.getBoundingClientRect()
-  const offs = nodes.map((n) => n.getBoundingClientRect().top - scRect.top + sc.scrollTop)
-  let cur = -1
-  for (let i = 0; i < offs.length; i++) if (offs[i] <= sc.scrollTop + 64) cur = i
-  const from = Math.max(0, cur - 5)
-  const to = Math.min(nodes.length, (cur < 0 ? 0 : cur) + 7)
-  const sig = cur + '|' + nodes.length + '|' + from + '|' + to + '|' + nodes.slice(from, to).map((n) => n.dataset.k).join(',')
-  if (qFloatSig !== sig) {
-    qFloatSig = sig
-    list.textContent = ''
-    for (let i = from; i < to; i++) {
-      const n = nodes[i]
-      const it = s.items.find((x) => x.kind === 'user' && x.seq != null && 'u' + x.seq === n.dataset.k)
-      const row = el('button', 'qf-row' + (i === cur ? ' cur' : ''))
-      row.type = 'button'
-      row.dataset.k = n.dataset.k || ''
-      const txt = (n.querySelector('.bubble') || n).innerText || ''
-      row.appendChild(el('span', 'qf-t', txt.replace(/\s+/g, ' ').trim() || '[图片]'))
-      const tm = n.querySelector('.meta-time')
-      if (tm) row.appendChild(el('span', 'qf-m', tm.textContent))
-      row.onclick = () => {
-        vibrate(8)
-        qFloatHide()
-        if (it) jumpToItem(s, it)
-        else {   // 兜底：找不到条目对象就按节点位置滚过去
-          const top = n.getBoundingClientRect().top - sc.getBoundingClientRect().top + sc.scrollTop
-          sc._selfScrollAt = Date.now()
-          s.follow = false
-          sc.scrollTop = Math.max(0, top - sc.clientHeight / 2)
-        }
-      }
-      list.appendChild(row)
-    }
-    const cnt = $('#qf-cnt')
-    if (cnt) cnt.textContent = '已加载 ' + nodes.length + ' 条'
-  }
-  box.classList.add('show')
-  box.setAttribute('aria-hidden', 'false')
-  qFloatHideSoon()
+  if (!s) return
+  vibrate(8)
+  const d = $('#q-drawer'), scrim = $('#q-scrim'), h = $('#q-handle')
+  d.classList.add('open'); d.setAttribute('aria-hidden', 'false')
+  scrim.classList.add('open')
+  h.setAttribute('aria-expanded', 'true'); h.classList.add('hidden')
+  buildQuestionList(s, $('#qd-list'), $('#qd-foot'), closeQDrawer)
+  $('#qd-list').scrollTop = 0
+}
+function closeQDrawer() {
+  qPanel = null   // 抽屉的列表容器卸载了，别再往它追加
+  const d = $('#q-drawer'), scrim = $('#q-scrim'), h = $('#q-handle')
+  if (!d) return
+  d.classList.remove('open'); d.setAttribute('aria-hidden', 'true')
+  scrim.classList.remove('open')
+  if (h) { h.setAttribute('aria-expanded', 'false'); h.classList.remove('hidden') }
 }
 /* 定位到某条消息：不在当前窗口就向前翻页找，然后居中 + 高亮闪一下 */
 async function jumpToItem(s, ref) {
@@ -3783,9 +3745,12 @@ function buildShell() {
       <span class="tb-track"><i class="tb-fill" id="tb-fill"></i></span>
     </div>
     <div class="chat-scroll" id="chat-scroll"></div>
-    <div class="q-float" id="q-float" aria-hidden="true">
-      <div class="qf-head"><span>问过的问题</span><span class="qf-cnt" id="qf-cnt"></span></div>
-      <div class="qf-list" id="qf-list"></div>
+    <button class="q-handle" id="q-handle" type="button" aria-label="问过的问题" aria-expanded="false"><span class="qh-ic" data-ic="qlist"></span></button>
+    <div class="q-scrim" id="q-scrim"></div>
+    <div class="q-drawer" id="q-drawer" role="dialog" aria-label="问过的问题" aria-hidden="true">
+      <div class="qd-head"><span class="qd-title">问过的问题</span><span class="qd-cnt" id="qd-cnt"></span><button class="think-close" id="qd-close" type="button" aria-label="关闭">✕</button></div>
+      <div class="qd-list" id="qd-list"></div>
+      <div class="qd-foot" id="qd-foot"></div>
     </div>
     <div class="composer-wrap">
       <div class="stale-strip" id="stale-strip" style="display:none"></div>
@@ -3929,6 +3894,9 @@ function buildShell() {
   })
   $('#chat-back').onclick = () => { location.hash = '#/' }
   $('#chat-more').onclick = () => { if (S.current) openSheet(sess(S.current)) }
+  $('#q-handle').onclick = () => openQDrawer()
+  $('#qd-close').onclick = () => closeQDrawer()
+  $('#q-scrim').addEventListener('click', () => closeQDrawer())
   $('#sheet-overlay').addEventListener('click', (e) => { if (e.target.id === 'sheet-overlay') closeSheet() })
   $('#new-cancel').onclick = () => { location.hash = '#/' }
   $('#fab-new').onclick = () => { vibrate(8); S.todoMode = false; location.hash = '#/new'; updateTabs() }
@@ -4032,12 +4000,6 @@ function buildShell() {
     if (S.current) sess(S.current)._newBelow = false
     updateJumpPill()
   })
-  // 浮层内部在滑/按住：别把浮层收走
-  const qf = $('#q-float')
-  if (qf) {
-    qf.addEventListener('touchstart', () => { qFloatCancelHide(); qFloatShow(true) }, { passive: true })
-    qf.addEventListener('scroll', () => { qFloatCancelHide(); qFloatHideSoon() }, true)
-  }
   // 图片解码后高度撑开会改变滚动几何：若 2.5s 内刚做过钉底决策，补钉一次（load 不冒泡，必须 capture）
   chatScrollEl().addEventListener('load', (e) => {
     if (!(e.target instanceof HTMLImageElement)) return
@@ -4052,11 +4014,9 @@ function buildShell() {
     if (S.current) sess(S.current).follow = nearBottom(sc)  // 跟随意图：到底 true、离开 false
     // 用户滚动会刷新锚点期望值：图片补位逻辑就不会把「用户自己滑的距离」当成排版位移补回去
     if (sc._anchor && sc._anchor.key) { const n = sc.querySelector('[data-k="' + sc._anchor.key + '"]'); if (n) sc._anchor.top = n.getBoundingClientRect().top }
-    // 用户真的在滑（不是重建后对位/钉底）→ 飘出提问浮层；停手 1.5s 自己淡出
     const userScrolled = Date.now() - (sc._selfScrollAt || 0) > 200
-    if (userScrolled) qFloatShow()
     updateJumpPill()
-    // 上滑预取：离顶还有 ~1.5 屏就开始拉更早的内容（不必等滚到顶），用户手势期间可连续补几页
+    // 上滑预取：离顶还有 ~2 屏就开始拉更早的内容（不必等滚到顶），用户手势期间可连续补几页
     if (userScrolled && S.current) { prefetchChain = 0; maybeLoadEarlier(sess(S.current)) }
   }, { passive: true })
   // 聊天区点击委派：代码块复制 / 链接拉起浏览器 / 图片放大
