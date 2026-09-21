@@ -818,14 +818,19 @@ html.light .stale-strip .st-x { background:rgba(154,74,6,.12); }
 .q-chip .q-text { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 /* 排队操作单 */
 .q-sheet { max-height:72%; padding-bottom:14px; }
+.q-sheet.editing { max-height:88%; }  /* 编辑长文本：整张单子给足高度（键盘弹出后 72% 只剩很小一块） */
+/* 单子正文可滚动：编辑框不设 max-height 时由这里兜住溢出，长文本不会被 overflow:hidden 裁掉选不中 */
+.q-body { flex:1 1 auto; min-height:0; }
 .act-row { display:flex; align-items:center; gap:12px; padding:14px 20px; font-size:15.5px; font-weight:600; cursor:pointer; }
 .act-row:active { background:var(--bg-card); }
 .act-row .ic { width:22px; text-align:center; }
 .act-row.danger { color:var(--red); }
 .act-row .sub { font-size:11.5px; font-weight:400; color:var(--text-3); margin-left:auto; }
-.q-edit-box { display:none; margin:4px 16px 10px; background:var(--bg-card); border:.5px solid var(--line); border-radius:13px; padding:12px 14px; min-height:84px; font-size:16px; color:var(--text); outline:none; }  /* 16px：15px 会触发 iOS 聚焦自动缩放 */
+.q-sheet.editing #q-a-edit, .q-sheet.editing #sess-a-rename { display:none; }  /* 已在编辑：这条入口占位置，收起来 */
+.q-edit-box { display:none; margin:4px 16px 10px; background:var(--bg-card); border:.5px solid var(--line); border-radius:13px; padding:12px 14px; min-height:84px; font-size:16px; line-height:1.55; color:var(--text); outline:none; white-space:pre-wrap; overflow-wrap:break-word; -webkit-user-modify:read-write-plaintext-only; }  /* 16px：15px 会触发 iOS 聚焦自动缩放；pre-wrap 保住换行 */
 .q-edit-box.show { display:block; }
-.q-save { display:none; margin:0 16px; width:calc(100% - 32px); padding:12px 0; border:none; border-radius:12px; background:var(--accent-fill); color:#fff; font-size:15px; font-weight:700; }
+.q-edit-box:focus { border-color:var(--accent); }
+.q-save { display:none; flex:none; margin:0 16px; width:calc(100% - 32px); padding:12px 0; border:none; border-radius:12px; background:var(--accent-fill); color:#fff; font-size:15px; font-weight:700; }
 .q-save.show { display:block; }
 /* ⋯ 统计面板 */
 .ctx-hero { display:flex; align-items:center; gap:16px; padding:6px 16px 10px; }

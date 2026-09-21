@@ -1453,18 +1453,22 @@ function openSessionMenu(sid, x, y, expandRename) {
   $('#sess-a-stop').style.display = s.running ? 'flex' : 'none'
   $('#sess-rename-box').classList.remove('show')
   $('#sess-rename-save').classList.remove('show')
+  sheet.classList.remove('editing')
   $('#sess-rename-box').textContent = sessTitle(s)
+  const sessBody = $('#sess-sheet .q-body')
+  if (sessBody) sessBody.scrollTop = 0
   const wire = (id, fn) => { $(id).onclick = fn }
   const expandRenameBox = () => {
     vibrate(8)
     $('#sess-rename-box').classList.add('show')
     $('#sess-rename-save').classList.add('show')
+    sheet.classList.add('editing')
     $('#sess-rename-box').focus()
   }
   wire('#sess-a-rename', expandRenameBox)
   if (expandRename) setTimeout(expandRenameBox, 120)  // 左滑「改名」直达编辑
   wire('#sess-rename-save', async () => {
-    const t = $('#sess-rename-box').textContent.trim()
+    const t = editableText($('#sess-rename-box')).replace(/\n+/g, ' ')
     if (!t) { toast('标题不能为空', true); return }
     vibrate(8)
     try {
@@ -1509,6 +1513,7 @@ function openSessionMenu(sid, x, y, expandRename) {
   ovSet('sess-ov', true); sheet.classList.add('open')
 }
 function closeSessionMenu() {
+  blurInside($('#sess-sheet'))
   ovSet('sess-ov', false); $('#sess-sheet').classList.remove('open')
 }
 function refreshBadges() {
@@ -2329,24 +2334,35 @@ function renderQueueStrip(s) {
     strip.appendChild(chip)
   }
 }
+/* 读 contenteditable 的真实文本：编辑时浏览器用 <br>/<div> 表示换行，textContent 会把换行吞掉 */
+function editableText(node) {
+  if (!node) return ''
+  let t = ''
+  try { if (typeof node.innerText === 'string') t = node.innerText } catch (e) { t = '' }
+  if (!t) t = node.textContent || ''
+  return t.replace(/\u00a0/g, ' ').trim()
+}
 /* 排队操作单：编辑 / 立即插话 / 删除 */
 function openQSheet(s, q) {
   vibrate(8)
-  const ov = $('#q-ov'), sheet = $('#q-sheet')
+  const ov = $('#q-ov'), sheet = $('#q-sheet'), box = $('#q-edit-box'), body = $('#q-body')
   const text = textOf(q.message && q.message.content)
   $('#q-a-steer').style.display = q.placement === 'steering' ? 'none' : 'flex'
-  $('#q-edit-box').classList.remove('show')
+  box.classList.remove('show')
   $('#q-save').classList.remove('show')
-  $('#q-edit-box').textContent = text
+  sheet.classList.remove('editing')
+  box.textContent = text
+  if (body) body.scrollTop = 0
   const sid = s.id, itemId = q.id
   $('#q-a-edit').onclick = () => {
     vibrate(8)
-    $('#q-edit-box').classList.add('show')
+    box.classList.add('show')
     $('#q-save').classList.add('show')
-    $('#q-edit-box').focus()
+    sheet.classList.add('editing')  // 编辑长文本：单子放高，正文区自己滚，全文都能选到
+    box.focus()
   }
   $('#q-save').onclick = async () => {
-    const newText = $('#q-edit-box').textContent.trim()
+    const newText = editableText(box)
     if (!newText) { toast('内容不能为空', true); return }
     vibrate(8)
     try {
@@ -2374,8 +2390,14 @@ function openQSheet(s, q) {
   ovSet('q-ov', true); sheet.classList.add('open')
 }
 function closeQSheet() {
+  blurInside($('#q-sheet'))
   ovSet('q-ov', false)
   $('#q-sheet').classList.remove('open')
+}
+/* 关单子时把键盘收走：焦点留在已关闭的编辑框上会让 iOS 键盘挂在屏幕上 */
+function blurInside(root) {
+  const a = document.activeElement
+  if (root && a && a !== document.body && typeof a.blur === 'function' && root.contains(a)) a.blur()
 }
 /* 运行中发送模式：默认排队（与桌面一致），长按发送=本次反向 */
 function busyEnter() {
@@ -3371,10 +3393,12 @@ function buildShell() {
   <div class="sheet-overlay" id="q-ov" aria-hidden="true">
     <div class="sheet q-sheet" id="q-sheet" role="dialog" aria-label="排队消息管理">
       <div class="grabber"></div>
-      <div class="act-row" id="q-a-edit" role="button" tabindex="0"><span class="ic" data-act-ic="pencil"></span>编辑内容<span class="sub">修改这段排队的文本</span></div>
-      <div class="act-row" id="q-a-steer" role="button" tabindex="0"><span class="ic" data-act-ic="bolt"></span>立即插话<span class="sub">不等本轮结束，马上生效</span></div>
-      <div class="act-row danger" id="q-a-del" role="button" tabindex="0"><span class="ic" data-act-ic="trash"></span>删除<span class="sub">取消这条排队</span></div>
-      <div class="q-edit-box" id="q-edit-box" contenteditable aria-label="编辑排队内容"></div>
+      <div class="sheet-scroll q-body" id="q-body">
+        <div class="act-row" id="q-a-edit" role="button" tabindex="0"><span class="ic" data-act-ic="pencil"></span>编辑内容<span class="sub">修改这段排队的文本</span></div>
+        <div class="act-row" id="q-a-steer" role="button" tabindex="0"><span class="ic" data-act-ic="bolt"></span>立即插话<span class="sub">不等本轮结束，马上生效</span></div>
+        <div class="act-row danger" id="q-a-del" role="button" tabindex="0"><span class="ic" data-act-ic="trash"></span>删除<span class="sub">取消这条排队</span></div>
+        <div class="q-edit-box" id="q-edit-box" contenteditable aria-label="编辑排队内容"></div>
+      </div>
       <button class="q-save" id="q-save" type="button">保存修改</button>
     </div>
   </div>
@@ -3382,11 +3406,13 @@ function buildShell() {
     <div class="sheet q-sheet" id="sess-sheet" role="dialog" aria-label="会话操作">
       <div class="grabber"></div>
       <div class="sess-menu-title" id="sess-menu-title"></div>
-      <div class="act-row" id="sess-a-rename" role="button" tabindex="0"><span class="ic" data-act-ic="pencil"></span>重命名<span class="sub">改这个会话的标题</span></div>
-      <div class="act-row" id="sess-a-fork" role="button" tabindex="0"><span class="ic" data-act-ic="fork"></span>分叉<span class="sub">复制到新会话继续</span></div>
-      <div class="act-row" id="sess-a-stop"><span class="ic">⏹</span>停止<span class="sub">中断正在运行的任务</span></div>
-      <div class="act-row" id="sess-a-archive"><span class="ic">📦</span>归档<span class="sub">从列表收起（桌面端可恢复）</span></div>
-      <div class="q-edit-box" id="sess-rename-box" contenteditable aria-label="新标题"></div>
+      <div class="sheet-scroll q-body">
+        <div class="act-row" id="sess-a-rename" role="button" tabindex="0"><span class="ic" data-act-ic="pencil"></span>重命名<span class="sub">改这个会话的标题</span></div>
+        <div class="act-row" id="sess-a-fork" role="button" tabindex="0"><span class="ic" data-act-ic="fork"></span>分叉<span class="sub">复制到新会话继续</span></div>
+        <div class="act-row" id="sess-a-stop"><span class="ic">⏹</span>停止<span class="sub">中断正在运行的任务</span></div>
+        <div class="act-row" id="sess-a-archive"><span class="ic">📦</span>归档<span class="sub">从列表收起（桌面端可恢复）</span></div>
+        <div class="q-edit-box" id="sess-rename-box" contenteditable aria-label="新标题"></div>
+      </div>
       <button class="q-save" id="sess-rename-save" type="button">保存标题</button>
     </div>
   </div>
