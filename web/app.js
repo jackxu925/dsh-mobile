@@ -2513,7 +2513,14 @@ function refreshRunDur(s) {
     el.textContent = ''
     return
   }
-  el.textContent = ' · ' + fmtTurnDur(Math.max(0, hostNow(s) - s._turnStartAt))
+  el.textContent = ' · ' + fmtRunClock(Math.max(0, hostNow(s) - s._turnStartAt))
+}
+/* 标题栏走秒表：mm:ss / h:mm:ss——每一秒都在变（fmtTurnDur 的「8.5分」要 6 秒才跳一次，不是读秒的感觉） */
+function fmtRunClock(ms) {
+  const t = Math.floor(Math.max(0, ms) / 1000)
+  const h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), sec = t % 60
+  const mm = String(m).padStart(2, '0'), ss = String(sec).padStart(2, '0')
+  return h > 0 ? h + ':' + mm + ':' + ss : m + ':' + ss
 }
 function ensureRunDurTimer() {
   if (runDurTimer) return
