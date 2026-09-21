@@ -589,6 +589,37 @@ html.light .sheet { box-shadow:0 -12px 44px rgba(15,23,42,.18); }
 /* 定位高亮闪烁 */
 .q-flash { animation:qflash 1.6s ease-out; border-radius:15px; }
 @keyframes qflash { 0%,40% { box-shadow:0 0 0 4px rgba(255,159,10,.75); } 100% { box-shadow:0 0 0 0 rgba(255,159,10,0); } }
+/* ---- 任意内容引用：chips 条 + 注解面板 + 气泡内引用块 ---- */
+.quote-strip { display:none; gap:7px; overflow-x:auto; padding:7px 12px 2px; scrollbar-width:none; }
+.quote-strip.show { display:flex; }
+.quote-strip::-webkit-scrollbar { display:none; }
+.qt-chip { flex:none; display:flex; align-items:center; gap:6px; max-width:230px; padding:6px 10px; border-radius:11px; background:var(--bg-card); border:1px solid rgba(59,130,246,.35); cursor:pointer; font-family:var(--font); }
+.qt-chip:active { background:var(--bg-card-2); }
+.qt-chip .qi { flex:none; min-width:18px; height:18px; border-radius:6px; background:var(--accent-soft); color:var(--info); font-size:9.5px; font-weight:700; display:flex; align-items:center; justify-content:center; padding:0 3px; }
+.qt-chip .qx { font-size:11px; color:var(--text-2); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.qt-chip .nd { flex:none; width:6px; height:6px; border-radius:50%; background:var(--orange); }
+.qt-chip .rm { flex:none; border:none; background:none; color:var(--text-3); font-size:13px; padding:2px 3px; cursor:pointer; min-width:20px; min-height:20px; }
+.qt-chip .rm:active { color:var(--red); }
+/* 注解面板 */
+.quote-full { flex:none; margin:4px 16px 0; background:var(--bg-card); border:.5px solid var(--line); border-left:3px solid var(--accent); border-radius:10px; padding:10px 12px; font-size:12.5px; line-height:1.6; color:var(--text-2); max-height:34vh; overflow-y:auto; white-space:pre-wrap; word-break:break-word; font-family:var(--font); }
+.note-in { margin:10px 16px 0; background:var(--bg-card); border:1px solid rgba(59,130,246,.4); border-radius:12px; padding:10px 12px; font-size:13.5px; color:var(--text); min-height:44px; outline:none; -webkit-user-modify:read-write-plaintext-only; }
+.note-in:empty::before { content:attr(data-ph); color:var(--text-3); }
+.qbtns { display:flex; gap:9px; margin:12px 16px 18px; }
+.qbtns button { flex:1; border:none; border-radius:12px; padding:12px 0; font-size:14px; font-weight:650; font-family:var(--font); min-height:44px; }
+.qbtns .del { background:rgba(255,69,58,.12); color:var(--red); }
+.qbtns .ok { background:var(--accent); color:#fff; }
+/* 气泡内的引用块 */
+.bubble .qblk { border-left:2.5px solid rgba(148,163,184,.55); padding-left:8px; margin-bottom:6px; font-size:12.5px; white-space:pre-wrap; word-break:break-word; }
+.msg.user .bubble .qblk { border-color:rgba(255,255,255,.55); opacity:.92; }
+.msg.bot .bubble .qblk { color:var(--text-2); }
+.bubble .qnote { border-left:2.5px solid var(--orange); padding-left:8px; margin-bottom:6px; font-size:12.5px; }
+.msg.user .bubble .qnote { color:#ffe3bd; }
+.msg.bot .bubble .qnote { color:var(--orange); }
+.bubble .qbody { white-space:pre-wrap; word-break:break-word; }
+.meta-ico.sys-q { width:22px; height:22px; opacity:.65; }
+html.light .qt-chip .qi { color:#2563eb; }
+html.light .bubble .qblk { border-color:rgba(71,85,105,.5); }
+
 /* 分叉确认小弹条 */
 .fork-pop { position:fixed; z-index:90; display:flex; gap:2px; background:rgba(29,35,49,.97); border:1px solid var(--line); border-radius:13px; padding:5px; box-shadow:0 10px 28px rgba(0,0,0,.55); animation:popin .16s var(--ease-out); }
 @keyframes popin { from { opacity:0; transform:scale(.92) translateY(4px); } }

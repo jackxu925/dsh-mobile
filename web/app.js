@@ -96,6 +96,7 @@ const ICONS = {
   globe: SVG_OPEN + '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a13.5 13.5 0 0 1 0 18M12 3a13.5 13.5 0 0 0 0 18"/></svg>',
   wrench: SVG_OPEN + '<path d="M14.7 6.3a4.5 4.5 0 0 0-6 6L3 18l3 3 5.7-5.7a4.5 4.5 0 0 0 6-6L14 13l-3-3 3.7-3.7z"/></svg>',
   trash: SVG_OPEN + '<path d="M4 7h16M9 7V5a1.5 1.5 0 0 1 1.5-1.5h3A1.5 1.5 0 0 1 15 5v2m3 0-.8 12a2 2 0 0 1-2 1.9H8.8a2 2 0 0 1-2-1.9L6 7"/><path d="M10 11v6M14 11v6"/></svg>',
+  quote: SVG_OPEN + '<path d="M9.5 8H7.8C6.2 8 5 9.3 5 11s1 3 2.4 3c1.2 0 2-.8 2-2 0-1-.7-1.8-1.7-1.8h-.3c.2-1 .9-1.7 2-1.9zM17 8h-1.7c-1.6 0-2.8 1.3-2.8 3s1 3 2.4 3c1.2 0 2-.8 2-2 0-1-.7-1.8-1.7-1.8h-.3c.2-1 .9-1.7 2-1.9z"/>',
   fork: SVG_OPEN + '<circle cx="6" cy="5" r="2.2"/><circle cx="18" cy="5" r="2.2"/><circle cx="12" cy="19" r="2.2"/><path d="M6 7.2v2a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3v-2M12 12.2v4.6"/></svg>',
   archive: SVG_OPEN + '<rect x="3" y="4" width="18" height="4.5" rx="1.5"/><path d="M5 8.5V19a1.5 1.5 0 0 0 1.5 1.5h11A1.5 1.5 0 0 0 19 19V8.5M10 12.5h4"/></svg>',
   sliders: SVG_OPEN + '<path d="M4 8h16M4 16h16"/><circle cx="9" cy="8" r="2.2"/><circle cx="15" cy="16" r="2.2"/></svg>',
@@ -551,6 +552,12 @@ function toolNode(item) {
   head.append(ico, mid)
   // 这一步之前的思考挂在这张卡上（原本它是一条只有思考、没有正文的空泡泡）
   if (item.reasoning && item.reasoning.trim()) head.appendChild(thinkDot(() => openThink({ text: item.reasoning, live: false })))
+  const tq = el('button', 'meta-ico')
+  tq.type = 'button'
+  tq.setAttribute('aria-label', '引用这次调用（命令+输出）')
+  tq.innerHTML = ICONS.quote
+  tq.onclick = (e) => { e.stopPropagation(); addQuote(S.current, '工具·' + (item.name || '调用'), toolQuoteText(item)) }
+  head.appendChild(tq)
   head.append(state, chev)
   const body = el('div', 'tool-body')
   const pre = el('pre')
@@ -844,13 +851,109 @@ function renderListSoon() {
   if (listTimer) return
   listTimer = setTimeout(() => { listTimer = null; renderList() }, 300)
 }
+/* ================= 任意内容引用（方案 A 增强：每条内容下方常驻 ❝ 图标，点即引用） ================= */
+const quoteDrafts = new Map()   // sessionId → [{label, text, note}]
+const quotesOf = (sid) => { if (!quoteDrafts.has(sid)) quoteDrafts.set(sid, []); return quoteDrafts.get(sid) }
+function addQuote(sid, label, text) {
+  const arr = quotesOf(sid)
+  if (arr.length >= 6) { toast('最多同时引用 6 条', true); return }
+  arr.push({ label, text: String(text || '').trim(), note: '' })
+  vibrate(8)
+  renderQuoteStrip()
+}
+/* 工具调用的引用全文：命令 + 输出（超长截断） */
+function toolQuoteText(item) {
+  let t = ''
+  if (item.name === 'bash' && item.args && item.args.command) t += '$ ' + item.args.command + '\n'
+  if (item.result) t += (t ? '\n' : '') + item.result
+  if (!t) { try { t = JSON.stringify(item.args, null, 2) } catch (e) { t = '' } }
+  return t.length > 1500 ? t.slice(0, 1500) + '\n…（已截断）' : t
+}
+/* 发送编排：引用块 > [来源] + 【注】 + 正文 —— 协议只有 text，引用必须拼进文本（模型实际所见） */
+function composeQuoted(quotes, body) {
+  const parts = []
+  for (const q of quotes) {
+    parts.push('> [' + q.label + '] ' + q.text.replace(/\n/g, '\n> '))
+    if (q.note && q.note.trim()) parts.push('【注】' + q.note.trim())
+    parts.push('')
+  }
+  if (body && body.trim()) parts.push(body.trim())
+  return parts.join('\n')
+}
+/* 回读解析：把宿主存回的引用文本还原成结构（重进会话后气泡仍显示成分层引用块） */
+function parseQuotedMessage(text) {
+  if (typeof text !== 'string' || !/^> \[/.test(text)) return null
+  const lines = text.split('\n')
+  const quotes = []
+  let i = 0
+  while (i < lines.length) {
+    while (i < lines.length && lines[i] === '') i++   // 跳过引用块之间的空行
+    if (i >= lines.length || !lines[i].startsWith('> ')) break
+    const m = lines[i].match(/^> \[([^\]]+)\] ?(.*)$/)
+    const label = m ? m[1] : ''
+    let t = m ? m[2] : lines[i].slice(2)
+    i++
+    while (i < lines.length && lines[i].startsWith('> ') && !/^> \[/.test(lines[i])) { t += '\n' + lines[i].slice(2); i++ }
+    const q = { label, text: t, note: '' }
+    if (i < lines.length && lines[i].indexOf('【注】') === 0) { q.note = lines[i].slice(3); i++ }
+    quotes.push(q)
+  }
+  const body = lines.slice(i).join('\n').replace(/^\n+/, '')
+  return { quotes, body }
+}
+/* 引用 chips 条（输入框上方） */
+function renderQuoteStrip() {
+  const strip = $('#quote-strip')
+  if (!strip) return
+  const arr = S.current ? quotesOf(S.current) : []
+  strip.classList.toggle('show', arr.length > 0)
+  strip.textContent = ''
+  arr.forEach((q, i) => {
+    const chip = el('button', 'qt-chip')
+    chip.type = 'button'
+    chip.setAttribute('aria-label', '引用 ' + q.label + '：点按加注解')
+    const ico = el('span', 'qi', q.label === '用户' ? '你' : q.label === '助手' ? 'AI' : q.label === '系统' ? 'Sys' : '⌘')
+    const tx = el('span', 'qx', q.label + ' · ' + q.text.split('\n')[0])
+    chip.append(ico, tx)
+    if (q.note && q.note.trim()) chip.appendChild(el('span', 'nd'))
+    const rm = el('button', 'rm', '✕')
+    rm.type = 'button'
+    rm.setAttribute('aria-label', '移除这条引用')
+    rm.onclick = (e) => { e.stopPropagation(); arr.splice(i, 1); renderQuoteStrip() }
+    chip.appendChild(rm)
+    chip.onclick = () => { vibrate(8); openQuoteSheet(S.current, i) }
+    strip.appendChild(chip)
+  })
+}
+/* 注解面板 */
+let quoteEdit = { sid: null, i: 0 }
+function openQuoteSheet(sid, i) {
+  const arr = quotesOf(sid)
+  const q = arr[i]
+  if (!q) return
+  quoteEdit = { sid, i }
+  $('#quote-title').textContent = '引用 · ' + q.label
+  const full = $('#quote-full')
+  full.textContent = q.text
+  const note = $('#quote-note')
+  note.textContent = q.note || ''
+  ovSet('quote-ov', true)
+}
 function itemNode(s, item) {
   switch (item.kind) {
     case 'user': {
       const m = el('div', 'msg user')
       m.dataset.q = item.rpcId || item.time || ''
       const b = el('div', 'bubble' + (item.pending ? ' pending' : '') + (item.failed ? ' failed' : ''))
-      if (item.text) b.innerHTML = linkifyText(item.text)  // 裸 URL 可点；换行由 pre-wrap 保留
+      const parsed = parseQuotedMessage(item.text)
+      if (parsed) {
+        // 引用消息：引用块（含来源）+【注】+ 正文分层显示，原文仍是纯文本（协议兼容）
+        for (const q of parsed.quotes) {
+          b.appendChild(el('div', 'qblk', '[' + q.label + '] ' + q.text))
+          if (q.note) b.appendChild(el('div', 'qnote', '【注】' + q.note))
+        }
+        if (parsed.body) b.appendChild(el('div', 'qbody', parsed.body))
+      } else if (item.text) b.innerHTML = linkifyText(item.text)  // 裸 URL 可点；换行由 pre-wrap 保留
       if (item.images) for (const img of item.images) {
         if (img.previewUrl) {
           const im = el('img', 'msg-img')
@@ -871,6 +974,9 @@ function itemNode(s, item) {
         cp.onclick = () => { vibrate(8); copyText(item.text, (ok) => toast(ok ? '已复制 ✓' : '复制失败，请重试', !ok)) }
         meta.appendChild(cp)
       }
+      const uq = metaIcon('quote', '引用这条')
+      uq.onclick = () => addQuote(s.id, '用户', item.text || '[图片]')
+      meta.appendChild(uq)
       if (item.failed) {
         const r = el('span', 'retry-send', '发送失败 · 点按重试')
         meta.appendChild(r)
@@ -892,6 +998,9 @@ function itemNode(s, item) {
         cp.onclick = () => { vibrate(8); copyText(item.text, (ok) => toast(ok ? '已复制 ✓' : '复制失败，请重试', !ok)) }
         meta.appendChild(cp)
       }
+      const aq = metaIcon('quote', '引用这条回答')
+      aq.onclick = () => addQuote(s.id, '助手', item.text)
+      meta.appendChild(aq)
       if (item.reasoning && item.reasoning.trim()) meta.appendChild(thinkDot(() => openThink({ text: item.reasoning, live: false })))
       // 分叉（移植桌面端「轮尾 branch」语义）：只在已完成的轮次上开放；子代理会话不开放
       if (item.seq != null && !s.subagent && turnComplete(s, item)) {
@@ -911,8 +1020,15 @@ function itemNode(s, item) {
       return row
     }
     case 'sys': {
-      const d = el('div', null, item.text)
-      d.style.cssText = 'align-self:center;font-size:12.5px;color:var(--text-3);padding:4px 0'
+      const d = el('div', null)
+      d.style.cssText = 'align-self:center;font-size:12.5px;color:var(--text-3);padding:4px 0;display:flex;align-items:center;gap:6px'
+      d.appendChild(el('span', null, item.text))
+      const sq = el('button', 'meta-ico sys-q')
+      sq.type = 'button'
+      sq.setAttribute('aria-label', '引用这条系统消息')
+      sq.innerHTML = ICONS.quote
+      sq.onclick = () => addQuote(S.current, '系统', item.text)
+      d.appendChild(sq)
       return d
     }
   }
@@ -2075,6 +2191,7 @@ function refreshChatChrome(s) {
   renderTaskBar(s)
   renderStaleStrip()
   renderOfflineStrip()
+  renderQuoteStrip()
   renderQueueStrip(s)
   // 输入框 placeholder 明示发送模式（运行中按设置排队/插话；长按发送反向）
   const input2 = $('#chat-input')
@@ -2666,31 +2783,63 @@ function renderModelPanel(s) {
 function openQuestionsPanel(s) {
   openSubPanel('questions', '问过的问题', () => renderQuestionsPanel(s))
 }
-function renderQuestionsPanel(s) {
+async function renderQuestionsPanel(s) {
   const body = $('#sub-body')
   if (!body) return
   body.textContent = ''
-  const users = s.items.filter((i) => i.kind === 'user').slice().reverse()
-  if (!users.length) { body.appendChild(el('div', 'sheet-note', '这个窗口内还没有你发的消息')); return }
-  if (s.hasMore) body.appendChild(el('div', 'sheet-note', '只列出当前窗口内的；更早的会在你点击时自动向前翻页寻找'))
-  users.forEach((it, i) => {
+  body.appendChild(el('div', 'sheet-note', '正在翻全部历史…'))
+  const users = await collectAllQuestions(s).catch(() => s.items.filter((i) => i.kind === 'user'))
+  if (S.current !== s.id || subPanelKind !== 'questions') return   // 用户已离开
+  body.textContent = ''
+  if (!users.length) { body.appendChild(el('div', 'sheet-note', '这个对话里还没有你发过的消息')); return }
+  const newest = users.slice().reverse()
+  newest.forEach((it, i) => {
     const row = el('button', 'qrow')
     row.type = 'button'
     const no = el('span', 'qi', String(users.length - i))
     const txt = el('span', 'qt', it.text || '[图片]')
-    const tm = el('span', 'qm', fmtTime(it.time))
+    // 日期 + 时间：跨天/跨年的问题也能一眼分辨（原来只有时分，昨天的和上月的分不清）
+    const tm = el('span', 'qm', fmtTime(it.time))  // fmtTime 自带 今天/昨天/M月D日/[年份] 分层
     row.append(no, txt, tm)
     row.onclick = () => { vibrate(8); closeSheet(); jumpToItem(s, it) }
     body.appendChild(row)
   })
 }
+/* 收集本对话全部历史里的用户消息（不止当前窗口）：向更早翻页，折叠进临时对象、不动聊天区 */
+async function collectAllQuestions(s) {
+  const seen = new Set()
+  const out = []
+  const push = (it) => { if (it && it.kind === 'user') { const k = it.seq != null ? 's' + it.seq : 't' + it.time; if (!seen.has(k)) { seen.add(k); out.push(it) } } }
+  for (const it of s.items) push(it)
+  let through = s.oldestSeq, hasMore = s.hasMore, guard = 0
+  while (hasMore && through != null && through > 0 && guard++ < 30) {
+    const v = await rpc('session/page', { request: { address: followAddress(s.id), throughSeq: through - 1, maxMessages: 200 } })
+    const recs = v.records || []
+    if (!recs.length) break
+    const tmp = { items: [], callArgs: new Map(), live: null, _todoCalls: new Set(), _pendingCalls: [], _thinkBuf: '' }
+    for (const rec of recs) foldEvent(tmp, rec.event || rec)
+    for (const it of tmp.items) push(it)
+    const first = recs[0].event || recs[0]
+    if (typeof first.seq === 'number') through = first.seq
+    hasMore = !!v.hasMore
+  }
+  out.sort((a, b) => (a.time || 0) - (b.time || 0))
+  return out   // 时间正序（旧→新）
+}
 /* 定位到某条消息：不在当前窗口就向前翻页找，然后居中 + 高亮闪一下 */
-async function jumpToItem(s, item) {
+async function jumpToItem(s, ref) {
+  // 引用可能来自「翻全历史」收集的临时对象：按 seq/time/文本 匹配，而不是对象同一性
+  const match = (it) => it && it.kind === 'user' && (
+    (ref.seq != null && it.seq === ref.seq) ||
+    (ref.seq == null && ref.time != null && it.time === ref.time) ||
+    (ref.seq == null && ref.time == null && (it.text || '').slice(0, 24) === (ref.text || '').slice(0, 24))
+  )
   let guard = 0
-  while (!s.items.includes(item) && s.hasMore && guard++ < 12) {
+  while (!s.items.some(match) && s.hasMore && guard++ < 50) {
     await loadEarlier(s).catch(() => {})
   }
   if (S.current !== s.id) return
+  const item = s.items.find(match) || ref
   // 跳转=用户要看历史：置 follow=false，否则运行中的会话会在下一次渲染时被重新拽回底部；
   // 并且必须用瞬时定位（smooth 动画会被 80ms 一轮的重建销毁目标节点而中断）
   s.follow = false
@@ -3039,6 +3188,7 @@ function buildShell() {
       <div class="stale-strip off" id="offline-strip" style="display:none"></div>
       <div class="q-strip" id="q-strip"></div>
       <div class="attach-strip" id="attach-strip"></div>
+      <div class="quote-strip" id="quote-strip"></div>
       <div class="composer">
         <button class="c-btn" id="attach-btn" aria-label="添加图片"><span class="ic-slot" data-ic="plus"></span></button>
         <input type="file" id="attach-input" accept="image/png,image/jpeg,image/webp,image/gif" multiple style="display:none">
@@ -3096,6 +3246,18 @@ function buildShell() {
         <button class="think-close" id="task-close" type="button" aria-label="关闭">✕</button>
       </div>
       <div class="task-body" id="task-body"></div>
+    </div>
+  </div>
+  <div class="sheet-overlay" id="quote-ov" aria-hidden="true">
+    <div class="sheet q-sheet" role="dialog" aria-label="引用详情">
+      <div class="grabber"></div>
+      <div class="task-head">
+        <span class="task-title" id="quote-title">引用</span>
+        <button class="think-close" id="quote-close" type="button" aria-label="关闭">✕</button>
+      </div>
+      <pre class="quote-full" id="quote-full"></pre>
+      <div class="note-in" id="quote-note" contenteditable data-ph="给这条引用加一句注解（可选）…"></div>
+      <div class="qbtns"><button class="del" id="quote-del" type="button">删除引用</button><button class="ok" id="quote-save" type="button">保存注解</button></div>
     </div>
   </div>
   <div class="sheet-overlay" id="q-ov" aria-hidden="true">
@@ -3214,6 +3376,24 @@ function buildShell() {
     sheet.addEventListener('touchend', finish)
     sheet.addEventListener('touchcancel', finish)
   })()
+  // 引用注解面板：关闭/保存/删除
+  $('#quote-ov').addEventListener('click', (e) => { if (e.target.id === 'quote-ov') ovSet('quote-ov', false) })
+  $('#quote-close').onclick = () => ovSet('quote-ov', false)
+  $('#quote-save').onclick = () => {
+    const arr = quotesOf(quoteEdit.sid)
+    if (arr[quoteEdit.i]) arr[quoteEdit.i].note = $('#quote-note').textContent
+    ovSet('quote-ov', false)
+    renderQuoteStrip()
+    vibrate(8)
+  }
+  $('#quote-del').onclick = () => {
+    const arr = quotesOf(quoteEdit.sid)
+    if (arr[quoteEdit.i]) arr.splice(quoteEdit.i, 1)
+    // 删除后指向下一条（若有），保持面板可连续编辑
+    if (arr.length) { openQuoteSheet(quoteEdit.sid, Math.min(quoteEdit.i, arr.length - 1)) }
+    else ovSet('quote-ov', false)
+    renderQuoteStrip()
+  }
   // ⋯ 菜单二级面板：返回按钮
   const subBack = $('#sub-back')
   if (subBack) subBack.onclick = () => { vibrate(8); closeSubPanel() }
@@ -3329,7 +3509,13 @@ function buildShell() {
     }
   })
   const doSend = async (forceMode) => {
-    const text = input.textContent.trim()
+    let text = input.textContent.trim()
+    // 有引用：拼成「引用块 + 【注】 + 正文」的纯文本（协议只有 text，这就是模型实际收到的）
+    if (S.current && quotesOf(S.current).length) {
+      text = composeQuoted(quotesOf(S.current), text)
+      quoteDrafts.delete(S.current)
+      renderQuoteStrip()
+    }
     if ((!text && !pendingImages.length) || !S.current) return
     if (S.connState !== 'online') { toast('当前离线，等待重连…', true); return }
     const images = pendingImages
@@ -3434,7 +3620,7 @@ document.addEventListener('keydown', (e) => {
 })
 setInterval(() => { if (S.connState !== 'online') loadBase() }, 15000)
 /* Esc 关闭最上层浮层（多个开着时关最后打开的那个） */
-const OV_CLOSERS = { 'sheet-overlay': closeSheet, 'think-overlay': closeThink, 'task-ov': closeTaskSheet, 'q-ov': closeQSheet, 'sess-ov': closeSessionMenu, 'img-viewer': () => ovSet('img-viewer', false) }
+const OV_CLOSERS = { 'sheet-overlay': closeSheet, 'think-overlay': closeThink, 'task-ov': closeTaskSheet, 'q-ov': closeQSheet, 'sess-ov': closeSessionMenu, 'quote-ov': () => ovSet('quote-ov', false), 'img-viewer': () => ovSet('img-viewer', false) }
 const ovStack = []
 const ovPush = (id) => { const i = ovStack.indexOf(id); if (i >= 0) ovStack.splice(i, 1); ovStack.push(id) }
 const ovPop = (id) => { const i = ovStack.indexOf(id); if (i >= 0) ovStack.splice(i, 1) }

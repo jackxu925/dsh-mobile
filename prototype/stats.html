@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>轮级统计 · 方案原型</title>
+<style>
+  :root {
+    --bg:#0b0e14; --bg-elev:#12161f; --bg-card:#171c28; --bg-card-2:#1d2331;
+    --line:rgba(255,255,255,.08); --text:#e8ebf1; --text-2:#9aa3b2; --text-3:#7d8590;
+    --accent:#3b82f6; --accent-soft:rgba(59,130,246,.16); --green:#34c759; --orange:#ff9f0a; --red:#ff453a; --purple:#bf5af2;
+    --mono:ui-monospace,"SF Mono",Menlo,monospace;
+    --font:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC",sans-serif;
+    --ease-out:cubic-bezier(0.23,1,0.32,1); --ease-drawer:cubic-bezier(0.32,0.72,0,1);
+  }
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body { background:#05070b; color:var(--text); font-family:var(--font); min-height:100vh; padding-bottom:70px; }
+  .head { padding:26px 18px 4px; max-width:1300px; margin:0 auto; }
+  .head h1 { font-size:20px; }
+  .head .sub { color:var(--text-2); font-size:13px; line-height:1.75; margin-top:8px; }
+  .head .sub b { color:var(--text); }
+  .quote { margin:14px 0 0; padding:11px 13px; border-left:2px solid var(--green); background:rgba(52,199,89,.06); border-radius:0 10px 10px 0; font-size:12.5px; color:var(--text-2); line-height:1.7; }
+  .bar { position:sticky; top:0; z-index:60; margin:16px 0 0; padding:10px 18px; background:rgba(5,7,11,.86); backdrop-filter:blur(14px); border-bottom:.5px solid var(--line); display:flex; gap:8px; overflow-x:auto; }
+  .bar a { flex:none; font-size:12px; color:var(--text-2); text-decoration:none; padding:7px 12px; border-radius:9px; border:1px solid var(--line); background:var(--bg-card); }
+  .stage { max-width:1300px; margin:0 auto; padding:18px 16px 0; display:flex; flex-wrap:wrap; gap:22px; justify-content:center; align-items:flex-start; }
+  .opt { width:395px; max-width:100%; }
+  .opt-head { display:flex; align-items:center; gap:9px; margin-bottom:8px; }
+  .opt-tag { flex:none; width:26px; height:26px; border-radius:8px; background:var(--accent-soft); color:#6aa6ff; font-size:13px; font-weight:700; display:flex; align-items:center; justify-content:center; }
+  .opt-name { font-size:15px; font-weight:700; }
+  .rec-badge { margin-left:auto; flex:none; font-size:10px; font-weight:700; color:var(--green); border:1px solid rgba(52,199,89,.4); border-radius:7px; padding:2.5px 7px; }
+  .opt-desc { font-size:12px; color:var(--text-3); line-height:1.6; margin-bottom:10px; min-height:34px; }
+  .phone { position:relative; background:var(--bg); border-radius:38px; border:9px solid #1c1f26; box-shadow:0 0 0 2px #33373f,0 22px 50px rgba(0,0,0,.6); overflow:hidden; height:640px; display:flex; flex-direction:column; }
+  .navbar { flex:none; display:flex; align-items:center; gap:8px; padding:12px 10px 10px; border-bottom:.5px solid var(--line); }
+  .navbar .bk { color:var(--accent); font-size:19px; width:26px; }
+  .navbar .mid { flex:1; min-width:0; }
+  .navbar .tt { font-size:16.5px; font-weight:650; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .navbar .nb { width:34px; height:34px; display:flex; align-items:center; justify-content:center; color:var(--accent); font-size:16px; cursor:pointer; }
+  .scroll { flex:1; overflow-y:auto; padding:12px; scrollbar-width:none; }
+  .scroll::-webkit-scrollbar { display:none; }
+  .ubub { margin:0 0 4px auto; max-width:86%; width:fit-content; background:var(--accent); color:#fff; border-radius:15px 15px 4px 15px; padding:9px 13px; font-size:13.5px; line-height:1.55; }
+  .meta-r { display:flex; gap:7px; align-items:center; font-size:11px; color:var(--text-3); margin:3px 0 14px auto; width:fit-content; }
+  .meta-l { margin:3px auto 14px 0; }
+  .abot { font-size:13.5px; line-height:1.65; color:var(--text); padding:2px 2px 0; }
+  .tool { background:var(--bg-card); border:.5px solid var(--line); border-radius:13px; padding:9px 12px; margin-bottom:8px; }
+  .tool .th { display:flex; align-items:center; gap:7px; font-size:13px; font-weight:600; }
+  .tool .ti { width:22px; height:22px; border-radius:7px; background:var(--accent-soft); color:#6aa6ff; display:flex; align-items:center; justify-content:center; font-size:11px; flex:none; }
+  .tool .tc { font-family:var(--mono); font-size:12px; color:var(--text-2); margin-top:5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .tool .ok { margin-left:auto; color:var(--green); font-size:12px; }
+  /* 轮尾统计：A1 meta 行内联 pill */
+  .stat-pill { display:inline-flex; align-items:center; gap:4px; padding:3px 8px; border-radius:9px; background:var(--bg-card); border:1px solid var(--line); font-size:10.5px; font-weight:600; color:var(--text-2); font-variant-numeric:tabular-nums; cursor:pointer; }
+  .stat-pill:active { background:var(--bg-card-2); }
+  .stat-pill .z { color:var(--orange); font-size:10px; }
+  /* 轮尾统计：A2/A3 独立 slim 条 */
+  .stat-bar { display:flex; align-items:center; gap:8px; margin:2px 0 14px; padding:7px 12px; background:var(--bg-card); border:.5px solid var(--line); border-radius:11px; font-size:11.5px; cursor:pointer; }
+  .stat-bar:active { background:var(--bg-card-2); }
+  .stat-bar .z { color:var(--orange); font-size:12px; flex:none; }
+  .stat-bar .v { color:var(--text-2); font-weight:600; font-variant-numeric:tabular-nums; white-space:nowrap; }
+  .stat-bar .sep { color:var(--text-3); }
+  .stat-bar .chev { margin-left:auto; color:var(--text-3); font-size:12px; }
+  .stat-bar .cache { color:var(--green); font-size:10.5px; }
+  .stat-mini { font-size:10.5px; color:var(--text-3); font-variant-numeric:tabular-nums; cursor:pointer; }
+  .stat-mini:active { color:#6aa6ff; }
+  /* 明细 sheet */
+  .ov { position:absolute; inset:0; background:rgba(0,0,0,.5); opacity:0; pointer-events:none; transition:opacity .22s; z-index:40; }
+  .ov.open { opacity:1; pointer-events:auto; }
+  .sheet { position:absolute; left:0; right:0; bottom:0; z-index:41; max-height:78%; background:var(--bg-elev); border-radius:18px 18px 0 0; transform:translateY(103%); transition:transform .3s var(--ease-drawer); display:flex; flex-direction:column; overflow:hidden; }
+  .sheet.open { transform:none; }
+  .grabber { width:38px; height:5px; border-radius:3px; background:var(--text-3); opacity:.6; margin:8px auto 4px; flex:none; }
+  .sheet-body { overflow-y:auto; padding:2px 14px 20px; }
+  .sheet-title { font-size:15px; font-weight:700; padding:4px 2px 10px; display:flex; align-items:baseline; gap:8px; }
+  .sheet-title .x { margin-left:auto; color:var(--text-3); font-size:15px; cursor:pointer; }
+  .sheet-title .big { font-size:19px; color:var(--orange); }
+  .grp { font-size:11px; font-weight:700; color:var(--text-3); padding:8px 2px 5px; }
+  .kv-grid { display:grid; grid-template-columns:1fr 1fr; gap:7px; }
+  .kv { background:var(--bg-card); border:.5px solid var(--line); border-radius:11px; padding:9px 11px; }
+  .kv .k { font-size:10.5px; color:var(--text-3); }
+  .kv .v { font-size:14.5px; font-weight:700; margin-top:2px; font-variant-numeric:tabular-nums; }
+  .kv .v small { font-size:10.5px; color:var(--text-3); font-weight:500; }
+  .kv.wide { grid-column:1 / -1; }
+  .kv .v.green { color:var(--green); }
+  .route { display:flex; align-items:center; gap:8px; background:var(--bg-card); border:.5px solid var(--line); border-radius:11px; padding:10px 12px; margin-top:7px; font-size:12.5px; }
+  .route .ri { width:22px; height:22px; border-radius:7px; background:var(--accent-soft); color:#6aa6ff; display:flex; align-items:center; justify-content:center; font-size:11px; flex:none; }
+  /* 统计面板（P4 用，复刻现有统计 sub-panel） */
+  .ctx-hero { display:flex; align-items:center; gap:14px; padding:13px 14px; background:var(--bg-card); border:.5px solid var(--line); border-radius:13px; margin-bottom:8px; }
+  .ctx-hero svg { flex:none; }
+  .ctx-num { flex:1; min-width:0; }
+  .ctx-num .big { font-size:16px; font-weight:750; }
+  .ctx-num .big small { font-size:11px; color:var(--text-3); font-weight:500; }
+  .ctx-num .cap { font-size:11px; color:var(--text-3); margin-top:3px; }
+  .brkd { display:flex; height:4px; border-radius:2px; overflow:hidden; margin-top:7px; }
+  .newrows { outline:1.5px dashed rgba(52,199,89,.55); outline-offset:2px; border-radius:11px; }
+  .newtag { font-size:9px; font-weight:700; color:var(--green); border:1px solid rgba(52,199,89,.5); border-radius:6px; padding:1px 5px; margin-left:5px; }
+  .sec { padding:6px 4px 8px; font-size:12px; font-weight:700; color:var(--text-3); }
+  .pros { margin-top:11px; }
+  .pros .li { display:flex; gap:8px; font-size:12.5px; line-height:1.65; color:var(--text-2); margin-bottom:5px; }
+  .pros .li b { color:var(--text); font-weight:600; }
+  .pros .li .k { flex:none; width:15px; }
+  .pros .li.good .k { color:var(--green); }
+  .pros .li.bad .k { color:var(--red); }
+  .pros .li.cost .k { color:var(--orange); }
+  .full { flex-basis:100%; max-width:1300px; }
+  .card { background:var(--bg-card); border:.5px solid var(--line); border-radius:16px; padding:16px 18px; margin-bottom:14px; }
+  .card h2 { font-size:15.5px; margin-bottom:4px; }
+  .card .d { font-size:12.5px; color:var(--text-3); line-height:1.7; margin-bottom:12px; }
+  table { width:100%; border-collapse:collapse; font-size:12px; }
+  th,td { text-align:left; padding:9px 8px; border-bottom:.5px solid var(--line); vertical-align:top; line-height:1.6; }
+  th { color:var(--text-3); font-size:11.5px; font-weight:600; }
+  .rec { border-color:rgba(52,199,89,.4); background:rgba(52,199,89,.06); }
+  .rec h2 { color:var(--green); }
+  .pick { display:flex; gap:9px; flex-wrap:wrap; margin-top:6px; }
+  .pick label { display:flex; gap:8px; align-items:center; font-size:12.5px; padding:9px 12px; border:1px solid var(--line); border-radius:12px; background:var(--bg-elev); cursor:pointer; }
+  .pick label.sel { border-color:var(--accent); background:var(--accent-soft); }
+  .pick input { accent-color:#3b82f6; }
+  .pick-h { font-size:13px; font-weight:700; color:var(--text-2); margin:14px 0 6px; }
+</style>
+</head>
+<body>
+
+<div class="head">
+  <h1>轮级统计 · 方案原型</h1>
+  <div class="sub">
+    每轮结束时能看到「这轮模型表现怎么样」：耗时、速度、token 消耗与缓存命中。<b>数据全部是宿主现成的</b>——
+    轮级来自 <code>assistant/message.usage</code> + 流式时间戳（桌面轮尾两个面板同款），会话级来自 <code>sessionStats</code> 投影（桌面统计对话框同款公式）。
+    原型里的数字都是本会话的真实采样（65 轮 / 平均 TTFT 8.6s / 平均 61.6 tok/s）。
+  </div>
+  <div class="quote">主要决策点是<b>轮尾统计的形态</b>：内联在现有 meta 行里（最轻）、轮尾独立统计条（桌面 TurnTail 式）、还是只给最新一轮显示（噪声控制）。明细面板三个方案共用同一个。</div>
+</div>
+
+<div class="bar">
+  <a href="#p1">P1 meta 行内联（推荐）</a><a href="#p2">P2 轮尾独立条</a><a href="#p3">P3 只最新一轮</a><a href="#p4">P4 统计面板补两行</a><a href="#cmp">对比</a>
+</div>
+
+<div class="stage" id="stage"></div>
+
+<div class="stage" style="display:block; max-width:1300px;">
+  <div class="card" id="cmp">
+    <h2>三个轮尾形态对比</h2>
+    <table>
+      <tr><th>形态</th><th>存在感</th><th>与现有 meta 行的关系</th><th>适合的信息量</th><th>备注</th></tr>
+      <tr><td><b>P1 meta 行内联 pill</b>（推荐）</td><td>低（一行小字）</td><td>和「时间·复制·思考·分叉」同排，天然一组</td><td>3 个关键数：时长 · 速度 · 总 tok</td><td>缓存命中%这类次级信息进明细面板</td></tr>
+      <tr><td><b>P2 轮尾独立统计条</b></td><td>中（占一整行）</td><td>轮的最后一条内容下面单独一条</td><td>4 个数 + 缓存命中%</td><td>和桌面 TurnTail footer 形态最像，但每轮都多占一行</td></tr>
+      <tr><td><b>P3 只最新一轮显示</b></td><td>低-中</td><td>最新一轮用 P2 条，历史轮只在 meta 行留个 ⚡ 小标</td><td>同 P2</td><td>噪声最小；看历史轮的统计要多点一下</td></tr>
+    </table>
+  </div>
+  <div class="card rec">
+    <h2>我的建议：P1 + 明细面板（P4 顺带必做）</h2>
+    <div class="d" style="margin-bottom:8px">
+      轮尾统计是给「瞟一眼」的，不该每轮多占一整行——<b>P1 把 ⚡12.4s · 61 tok/s · 8.2k 塞进现有 meta 行</b>，和复制/思考/分叉同排；
+      想看缓存命中、TTFT、耗时分解就点它开明细。P2 的独立条在长对话里会让每个轮次都多长一截，P3 的新旧不一致反而要解释规则。
+      <b>P4（统计面板补「平均 TTFT / 平均速度」两行）是纯加字段、零争议，建议和选定方案一起做掉。</b>
+    </div>
+    <div class="pick-h">轮尾形态选哪个？</div>
+    <div class="pick" id="pick">
+      <label><input type="radio" name="s" value="P1" checked> P1 meta 行内联（推荐）</label>
+      <label><input type="radio" name="s" value="P2"> P2 轮尾独立条</label>
+      <label><input type="radio" name="s" value="P3"> P3 只最新一轮</label>
+      <label><input type="radio" name="s" value="P1P3"> P1 内联 + 只显示最近 3 轮</label>
+    </div>
+    <div style="font-size:12px;color:var(--text-3);margin-top:10px">选好告诉我（P4 默认一起做），我按这个实现。</div>
+  </div>
+</div>
+
+<script>
+const el2 = (tag, cls, text) => { const d = document.createElement(tag); if (cls) d.className = cls; if (text != null) d.textContent = text; return d }
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
+
+const TURN = {
+  dur: '12.4s', ttft: '2.1s', decode: '10.3s', speed: '61 tok/s',
+  input: '4,562', cacheHit: '98.7%', cacheRead: '500,864', cacheWrite: '0',
+  output: '2,412', reasoning: '1,204', total: '507,838', route: 'glm / glm-5.3 · Max',
+}
+const SESS = { turns: '65', steps: '1,508', llm: '8.2 小时', tool: '1.3 小时', avgTtft: '8.6s', avgSpeed: '61.6 tok/s', input: '8.08M', output: '1.03M', cacheRead: '569.8M' }
+
+function phoneShell(title) {
+  const p = el2('div', 'phone')
+  p.innerHTML = `<div class="navbar"><span class="bk">‹</span><div class="mid"><div class="tt">${title}</div></div><span class="nb" data-more>⋯</span></div>
+    <div class="scroll" data-scroll></div>`
+  return p
+}
+function detailSheet(p) {
+  const ov = el2('div', 'ov'); const sheet = el2('div', 'sheet')
+  sheet.innerHTML = `<div class="grabber"></div><div class="sheet-body" data-sb></div>`
+  p.append(ov, sheet)
+  const close = () => { ov.classList.remove('open'); sheet.classList.remove('open') }
+  ov.onclick = (e) => { if (e.target === ov) close() }
+  return () => {
+    const sb = sheet.querySelector('[data-sb]')
+    sb.innerHTML = `<div class="sheet-title"><span class="big">⚡</span>本轮统计 · 第 47 轮<span class="x">✕</span></div>
+      <div class="grp">消耗</div>
+      <div class="kv-grid">
+        <div class="kv"><div class="k">输入（新增）</div><div class="v">${TURN.input} <small>tok</small></div></div>
+        <div class="kv"><div class="k">缓存命中</div><div class="v green">${TURN.cacheHit}</div></div>
+        <div class="kv"><div class="k">缓存读取</div><div class="v">${TURN.cacheRead} <small>tok</small></div></div>
+        <div class="kv"><div class="k">缓存写入</div><div class="v">${TURN.cacheWrite}</div></div>
+        <div class="kv"><div class="k">输出</div><div class="v">${TURN.output} <small>tok</small></div></div>
+        <div class="kv"><div class="k">其中思考</div><div class="v">${TURN.reasoning} <small>tok</small></div></div>
+        <div class="kv wide"><div class="k">本步总上下文</div><div class="v">${TURN.total} <small>tok</small></div></div>
+      </div>
+      <div class="grp">耗时</div>
+      <div class="kv-grid">
+        <div class="kv"><div class="k">总时长</div><div class="v">${TURN.dur}</div></div>
+        <div class="kv"><div class="k">TTFT（首 token）</div><div class="v">${TURN.ttft}</div></div>
+        <div class="kv"><div class="k">解码时长</div><div class="v">${TURN.decode}</div></div>
+        <div class="kv"><div class="k">速度</div><div class="v">${TURN.speed}</div></div>
+      </div>
+      <div class="grp">模型</div>
+      <div class="route"><span class="ri">AI</span>${TURN.route}</div>`
+    sb.querySelector('.sheet-title .x').onclick = close
+    ov.classList.add('open'); sheet.classList.add('open')
+  }
+}
+function chatTurns(sc, { tailMode }) {
+  sc.innerHTML = `
+    <div class="ubub">帮我把门店级产品结构分析做完并部署</div><div class="meta-r">14:02 ⧉ 💬</div>
+    <div class="abot">好，最后一块：把口径说明补进页面第三节，然后部署到 analysis 目录。</div>
+    <div class="tool"><div class="th"><span class="ti">▤</span>edit<span class="ok">✓</span></div><div class="tc">analysis/store_report.html</div></div>
+    <div class="tool"><div class="th"><span class="ti">▸</span>bash<span class="ok">✓</span></div><div class="tc">python render_overview.py --check</div></div>
+    <div class="abot">已补进第三节（口径：周转率 = 销量 ÷ 在售天数），校验通过，已部署。</div>
+    ${tailMode === 'bar' ? '' : `<div class="meta-r meta-l" style="margin-left:0">14:20 ⧉ 💬 ⑂ <span class="stat-pill" data-stat><span class="z">⚡</span>${TURN.dur} · ${TURN.speed} · ${(507838 / 1000).toFixed(1)}k tok</span></div>`}
+    ${tailMode === 'bar' ? `<div class="stat-bar" data-stat><span class="z">⚡</span><span class="v">${TURN.dur}</span><span class="sep">·</span><span class="v">${TURN.speed}</span><span class="sep">·</span><span class="v">${(507838 / 1000).toFixed(1)}k tok</span><span class="cache">命中 ${TURN.cacheHit}</span><span class="chev">›</span></div>` : ''}
+    <div class="ubub">周报也顺便汇总一下</div><div class="meta-r">14:21 ⧉ 💬</div>
+    <div class="tool"><div class="th"><span class="ti">▸</span>bash<span class="ok">✓</span></div><div class="tc">python weekly_2026W24.py</div></div>`
+}
+
+/* ============ P1：meta 行内联 pill ============ */
+function phoneP1() {
+  const p = phoneShell('门店级产品结构分析')
+  const sc = p.querySelector('[data-scroll]')
+  chatTurns(sc, { tailMode: 'inline' })
+  const open = detailSheet(p)
+  sc.querySelector('[data-stat]').onclick = open
+  return p
+}
+/* ============ P2：轮尾独立统计条 ============ */
+function phoneP2() {
+  const p = phoneShell('门店级产品结构分析')
+  const sc = p.querySelector('[data-scroll]')
+  chatTurns(sc, { tailMode: 'bar' })
+  const open = detailSheet(p)
+  sc.querySelector('[data-stat]').onclick = open
+  return p
+}
+/* ============ P3：只最新一轮 ============ */
+function phoneP3() {
+  const p = phoneShell('门店级产品结构分析')
+  const sc = p.querySelector('[data-scroll]')
+  sc.innerHTML = `
+    <div class="ubub">慢销 SKU 单独出一张表，按周转天数倒序</div><div class="meta-r">12:31 ⧉ 💬</div>
+    <div class="abot">慢销表现在单独一页了，按周转天数倒序，前 50 名标红。</div>
+    <div class="meta-r meta-l" style="margin-left:0">12:31 ⧉ 💬 <span class="stat-mini" data-stat-old>⚡ 9.8s</span></div>
+    <div class="ubub">帮我把门店级产品结构分析做完并部署</div><div class="meta-r">14:02 ⧉ 💬</div>
+    <div class="abot">好，最后一块：把口径说明补进页面第三节，然后部署到 analysis 目录。</div>
+    <div class="tool"><div class="th"><span class="ti">▤</span>edit<span class="ok">✓</span></div><div class="tc">analysis/store_report.html</div></div>
+    <div class="abot">已补进第三节，校验通过，已部署。</div>
+    <div class="stat-bar" data-stat><span class="z">⚡</span><span class="v">${TURN.dur}</span><span class="sep">·</span><span class="v">${TURN.speed}</span><span class="sep">·</span><span class="v">${(507838 / 1000).toFixed(1)}k tok</span><span class="cache">命中 ${TURN.cacheHit}</span><span class="chev">›</span></div>
+    <div style="text-align:center;font-size:10.5px;color:var(--text-3);padding:2px 0 8px">↑ 只有最新一轮显示统计条；历史轮次在 meta 行留一个可点的 ⚡ 小标</div>`
+  const open = detailSheet(p)
+  sc.querySelector('[data-stat]').onclick = open
+  sc.querySelector('[data-stat-old]').onclick = open
+  return p
+}
+/* ============ P4：统计面板补两行 ============ */
+function phoneP4() {
+  const p = phoneShell('门店级产品结构分析')
+  const sc = p.querySelector('[data-scroll]')
+  const ov = el2('div', 'ov'); const sheet = el2('div', 'sheet')
+  sheet.innerHTML = `<div class="grabber"></div><div class="sheet-body" data-sb></div>`
+  p.append(ov, sheet)
+  const openPanel = () => {
+    const sb = sheet.querySelector('[data-sb]')
+    sb.innerHTML = `<div class="sheet-title">统计<span class="x">✕</span></div>
+      <div class="ctx-hero">
+        <svg width="66" height="66" viewBox="0 0 84 84">
+          <circle cx="42" cy="42" r="36" fill="none" stroke="#1d2331" stroke-width="8"/>
+          <circle cx="42" cy="42" r="36" fill="none" stroke="#ff9f0a" stroke-width="8" stroke-linecap="round" stroke-dasharray="226.2" stroke-dashoffset="70" transform="rotate(-90 42 42)"/>
+          <text x="42" y="47" text-anchor="middle" font-size="16" font-weight="800" fill="#e8ebf1">69%</text>
+        </svg>
+        <div class="ctx-num">
+          <div class="big">720k <small>/ 1,048k tokens</small></div>
+          <div class="cap">下轮预估 721k · 剩余约 328k</div>
+          <div class="brkd"><i style="flex:73;background:#3b82f6"></i><i style="flex:24;background:#bf5af2"></i><i style="flex:3;background:#7d8590"></i></div>
+          <div class="cap">消息 525k · 工具 6.9k · 系统 1.7k</div>
+        </div>
+      </div>
+      <div class="grp">运行统计</div>
+      <div class="kv-grid">
+        <div class="kv"><div class="k">轮次 / 步数</div><div class="v">${SESS.turns} <small>轮</small> / ${SESS.steps} <small>步</small></div></div>
+        <div class="kv"><div class="k">累计 tokens</div><div class="v">${SESS.output} <small>输出</small></div></div>
+        <div class="kv"><div class="k">模型耗时</div><div class="v">${SESS.llm}</div></div>
+        <div class="kv"><div class="k">工具耗时</div><div class="v">${SESS.tool}</div></div>
+        <div class="kv newrows"><div class="k">平均 TTFT<span class="newtag">新</span></div><div class="v">${SESS.avgTtft}</div></div>
+        <div class="kv newrows"><div class="k">平均速度<span class="newtag">新</span></div><div class="v">${SESS.avgSpeed}</div></div>
+        <div class="kv"><div class="k">新增输入</div><div class="v">${SESS.input}</div></div>
+        <div class="kv"><div class="k">缓存读取</div><div class="v">${SESS.cacheRead}</div></div>
+      </div>
+      <div class="sec" style="font-weight:400;line-height:1.6">两行新字段就是桌面统计对话框的同款公式：平均 TTFT = ttftMs ÷ ttftSteps（1,505 步实测）；平均速度 = decodeTokens ÷ decodeMs（61.6 tok/s 实测）</div>`
+    sb.querySelector('.sheet-title .x').onclick = close
+    ov.classList.add('open'); sheet.classList.add('open')
+  }
+  const close = () => { ov.classList.remove('open'); sheet.classList.remove('open') }
+  ov.onclick = (e) => { if (e.target === ov) close() }
+  sc.innerHTML = `<div style="text-align:center;padding:60px 20px;font-size:13px;color:var(--text-3);line-height:1.8">这台演示的是 ⋯ 菜单里「统计」面板的现状 + 新增两行<br>（绿虚线框出来的两个）</div>`
+  p.querySelector('[data-more]').onclick = openPanel
+  setTimeout(openPanel, 600)
+  return p
+}
+
+/* ============ 组装 ============ */
+const OPTS = [
+  { id: 'p1', tag: 'P1', name: 'meta 行内联统计 pill', badge: '推荐', build: phoneP1,
+    desc: '助手消息的 meta 行（时间·复制·思考·分叉）末尾加一个小 pill：⚡ 12.4s · 61 tok/s · 507.8k tok。点它 → 明细面板（消耗/耗时/模型三组）。',
+    pros: [['good','不占新行','轮尾存在感最低，长对话每轮都有也不挤'],['good','与现有操作同排','复制/思考/分叉本来就是 meta 行成员，统计是第四个'],['good','关键三数够了','时长·速度·总 tok 一眼判表现；细节进面板'],['bad','pill 略小','11px，要看缓存命中%必须点开']], cost: '低：usage/timing 采集 + pill + 复用明细面板（约 200 行）' },
+  { id: 'p2', tag: 'P2', name: '轮尾独立统计条（桌面 TurnTail 式）', badge: '', build: phoneP2,
+    desc: '每轮最后一条内容下面单独一条 slim 条：⚡ 12.4s · 61 tok/s · 507.8k tok · 命中 98.7% ›。形态上和桌面轮尾 footer 最像，还能多放一个缓存命中。',
+    pros: [['good','信息一行放全','连缓存命中%都能直接显示，不用点开'],['good','最像桌面','TurnTail footer 的位置语义完全一致'],['bad','每轮多占一行','65 轮的对话就是 65 行纯装饰'],['bad','和 meta 行信息重复','时间/操作在上一行，统计在下一行，两条相邻']], cost: '低-中：同 P1 的数据 + 条形组件（约 220 行）' },
+  { id: 'p3', tag: 'P3', name: '只最新一轮显示统计条', badge: '', build: phoneP3,
+    desc: '统计条只挂在最新一轮的轮尾；历史轮次只在 meta 行留一个可点的 ⚡ 小标。噪声最小，代价是新旧规则不一致。',
+    pros: [['good','噪声最小','当前这轮最值得看，历史不刷屏'],['bad','规则要解释','「为什么有的轮有有的没有」需要一个说明行'],['bad','历史轮入口更深','看老轮的统计要先找到那个小 ⚡']], cost: '中：同 P2 + 新旧两套渲染路径（约 260 行）' },
+  { id: 'p4', tag: 'P4', name: '统计面板补两行（顺带必做）', badge: '', build: phoneP4,
+    desc: '⋯ 菜单的统计面板在现有 8 格基础上补「平均 TTFT」「平均速度」两格——sessionStats 现成字段，桌面统计对话框同款公式。和轮尾方案无关，建议必做。',
+    pros: [['good','零争议','纯加字段，不动任何现有布局'],['good','公式与桌面一致','ttftMs÷ttftSteps、decodeTokens÷decodeMs']], cost: '极低：两行渲染（约 10 行）' },
+]
+const stage = document.getElementById('stage')
+for (const o of OPTS) {
+  const box = el2('div', 'opt'); box.id = o.id
+  const head = el2('div', 'opt-head')
+  head.innerHTML = `<span class="opt-tag">${o.tag}</span><span class="opt-name"></span>${o.badge ? `<span class="rec-badge">${o.badge}</span>` : ''}`
+  head.querySelector('.opt-name').textContent = o.name
+  box.appendChild(head)
+  const d = el2('div', 'opt-desc'); d.textContent = o.desc; box.appendChild(d)
+  box.appendChild(o.build())
+  const pros = el2('div', 'pros')
+  pros.innerHTML = o.pros.map(([k, t, s2]) => `<div class="li ${k}"><span class="k">${k === 'good' ? '✓' : k === 'bad' ? '✕' : '·'}</span><span><b>${t}</b>：${s2}</span></div>`).join('') + `<div class="li cost"><span class="k">⚙</span><span>${o.cost}</span></div>`
+  box.appendChild(pros)
+  stage.appendChild(box)
+}
+document.querySelectorAll('#pick label').forEach((l) => {
+  l.onclick = () => setTimeout(() => {
+    document.querySelectorAll('#pick label').forEach((x) => x.classList.remove('sel'))
+    l.classList.add('sel')
+  }, 0)
+})
+</script>
+</body>
+</html>

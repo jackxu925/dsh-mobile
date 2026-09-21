@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>任意内容引用 · 方案原型</title>
+<style>
+  :root {
+    --bg:#0b0e14; --bg-elev:#12161f; --bg-card:#171c28; --bg-card-2:#1d2331;
+    --line:rgba(255,255,255,.08); --text:#e8ebf1; --text-2:#9aa3b2; --text-3:#7d8590;
+    --accent:#3b82f6; --accent-soft:rgba(59,130,246,.16); --green:#34c759; --orange:#ff9f0a; --red:#ff453a; --purple:#bf5af2;
+    --mono:ui-monospace,"SF Mono",Menlo,monospace;
+    --font:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC",sans-serif;
+    --ease-out:cubic-bezier(0.23,1,0.32,1); --ease-drawer:cubic-bezier(0.32,0.72,0,1);
+  }
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body { background:#05070b; color:var(--text); font-family:var(--font); min-height:100vh; padding-bottom:70px; }
+  .head { padding:26px 18px 4px; max-width:1300px; margin:0 auto; }
+  .head h1 { font-size:20px; }
+  .head .sub { color:var(--text-2); font-size:13px; line-height:1.75; margin-top:8px; }
+  .head .sub b { color:var(--text); }
+  .quote { margin:14px 0 0; padding:11px 13px; border-left:2px solid var(--orange); background:rgba(255,159,10,.07); border-radius:0 10px 10px 0; font-size:12.5px; color:var(--text-2); line-height:1.7; }
+  .bar { position:sticky; top:0; z-index:60; margin:16px 0 0; padding:10px 18px; background:rgba(5,7,11,.86); backdrop-filter:blur(14px); border-bottom:.5px solid var(--line); display:flex; gap:8px; overflow-x:auto; }
+  .bar a { flex:none; font-size:12px; color:var(--text-2); text-decoration:none; padding:7px 12px; border-radius:9px; border:1px solid var(--line); background:var(--bg-card); }
+  .stage { max-width:1300px; margin:0 auto; padding:18px 16px 0; display:flex; flex-wrap:wrap; gap:22px; justify-content:center; align-items:flex-start; }
+  .opt { width:395px; max-width:100%; }
+  .opt-head { display:flex; align-items:center; gap:9px; margin-bottom:8px; }
+  .opt-tag { flex:none; width:26px; height:26px; border-radius:8px; background:var(--accent-soft); color:#6aa6ff; font-size:13px; font-weight:700; display:flex; align-items:center; justify-content:center; }
+  .opt-name { font-size:15px; font-weight:700; }
+  .rec-badge { margin-left:auto; flex:none; font-size:10px; font-weight:700; color:var(--green); border:1px solid rgba(52,199,89,.4); border-radius:7px; padding:2.5px 7px; }
+  .rec-badge.warn { color:var(--orange); border-color:rgba(255,159,10,.4); }
+  .opt-desc { font-size:12px; color:var(--text-3); line-height:1.6; margin-bottom:10px; min-height:34px; }
+  .phone { position:relative; background:var(--bg); border-radius:38px; border:9px solid #1c1f26; box-shadow:0 0 0 2px #33373f,0 22px 50px rgba(0,0,0,.6); overflow:hidden; height:640px; display:flex; flex-direction:column; }
+  .navbar { flex:none; display:flex; align-items:center; gap:8px; padding:12px 10px 10px; border-bottom:.5px solid var(--line); }
+  .navbar .bk { color:var(--accent); font-size:19px; width:26px; }
+  .navbar .mid { flex:1; min-width:0; }
+  .navbar .tt { font-size:16.5px; font-weight:650; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .navbar .nb { width:34px; height:34px; display:flex; align-items:center; justify-content:center; color:var(--accent); font-size:16px; }
+  .scroll { flex:1; overflow-y:auto; padding:12px; scrollbar-width:none; }
+  .scroll::-webkit-scrollbar { display:none; }
+  .ubub { margin:0 0 4px auto; max-width:86%; width:fit-content; background:var(--accent); color:#fff; border-radius:15px 15px 4px 15px; padding:9px 13px; font-size:13.5px; line-height:1.55; }
+  .meta-r { display:flex; gap:8px; align-items:center; font-size:11px; color:var(--text-3); margin:3px 0 14px auto; width:fit-content; }
+  .meta-l { margin:3px auto 14px 0; }
+  .abot { font-size:13.5px; line-height:1.65; color:var(--text); padding:2px 2px 0; }
+  .tool { background:var(--bg-card); border:.5px solid var(--line); border-radius:13px; padding:9px 12px; margin-bottom:8px; }
+  .tool .th { display:flex; align-items:center; gap:7px; font-size:13px; font-weight:600; }
+  .tool .ti { width:22px; height:22px; border-radius:7px; background:var(--accent-soft); color:#6aa6ff; display:flex; align-items:center; justify-content:center; font-size:11px; flex:none; }
+  .tool .tc { font-family:var(--mono); font-size:12px; color:var(--text-2); margin-top:5px; }
+  .tool .ok { margin-left:auto; color:var(--green); font-size:12px; }
+  .tap-hint { position:absolute; left:50%; transform:translateX(-50%); bottom:72px; z-index:30; background:rgba(59,130,246,.92); color:#fff; font-size:11.5px; font-weight:600; padding:7px 13px; border-radius:14px; pointer-events:none; opacity:0; transition:opacity .3s; }
+  .tap-hint.show { opacity:1; }
+  /* 点按操作条 */
+  .apop { position:absolute; z-index:36; display:flex; gap:2px; background:rgba(29,35,49,.97); border:1px solid var(--line); border-radius:13px; padding:5px; box-shadow:0 10px 28px rgba(0,0,0,.55); animation:popin .16s var(--ease-out); }
+  @keyframes popin { from { opacity:0; transform:scale(.92) translateY(4px); } }
+  .apop button { border:none; background:none; color:var(--text-2); font-size:12.5px; font-weight:600; font-family:var(--font); padding:8px 12px; border-radius:9px; cursor:pointer; }
+  .apop button:active { background:var(--bg-card-2); }
+  .apop .y { color:#6aa6ff; }
+  /* 引用 chips（方案 A） */
+  .qstrip { flex:none; display:flex; gap:7px; overflow-x:auto; padding:7px 12px 2px; scrollbar-width:none; }
+  .qstrip::-webkit-scrollbar { display:none; }
+  .qchip { flex:none; display:flex; align-items:center; gap:6px; max-width:200px; padding:6px 9px; border-radius:11px; background:var(--bg-card); border:1px solid rgba(59,130,246,.35); cursor:pointer; }
+  .qchip .qi { flex:none; width:18px; height:18px; border-radius:6px; background:var(--accent-soft); color:#6aa6ff; font-size:10px; font-weight:700; display:flex; align-items:center; justify-content:center; }
+  .qchip .qi.u { background:var(--accent); color:#fff; }
+  .qchip .qt { font-size:11px; color:var(--text-2); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .qchip .note { flex:none; width:6px; height:6px; border-radius:50%; background:var(--orange); }
+  .qchip .x { flex:none; color:var(--text-3); font-size:12px; padding:0 1px; }
+  .qchip .x:active { color:var(--red); }
+  /* 引用条（方案 B） */
+  .qbar { flex:none; margin:0 12px 7px; padding:9px 11px 9px 12px; background:var(--bg-card); border:.5px solid var(--line); border-left:3px solid var(--accent); border-radius:10px; display:flex; gap:9px; align-items:flex-start; }
+  .qbar .qt { flex:1; min-width:0; font-size:12px; line-height:1.5; color:var(--text-3); display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+  .qbar .x { flex:none; color:var(--text-3); font-size:13px; padding:2px 4px; cursor:pointer; }
+  /* 注解小面板 */
+  .ov { position:absolute; inset:0; background:rgba(0,0,0,.5); opacity:0; pointer-events:none; transition:opacity .22s; z-index:40; }
+  .ov.open { opacity:1; pointer-events:auto; }
+  .sheet { position:absolute; left:0; right:0; bottom:0; z-index:41; max-height:72%; background:var(--bg-elev); border-radius:18px 18px 0 0; transform:translateY(103%); transition:transform .3s var(--ease-drawer); display:flex; flex-direction:column; overflow:hidden; }
+  .sheet.open { transform:none; }
+  .grabber { width:38px; height:5px; border-radius:3px; background:var(--text-3); opacity:.6; margin:8px auto 4px; flex:none; }
+  .sheet-body { overflow-y:auto; padding:2px 14px 18px; }
+  .sheet-title { font-size:14.5px; font-weight:700; padding:4px 2px 10px; display:flex; align-items:center; gap:8px; }
+  .sheet-title .x { margin-left:auto; color:var(--text-3); font-size:15px; cursor:pointer; }
+  .qfull { background:var(--bg-card); border:.5px solid var(--line); border-left:3px solid var(--accent); border-radius:10px; padding:10px 12px; font-size:12.5px; line-height:1.6; color:var(--text-2); max-height:180px; overflow-y:auto; white-space:pre-wrap; word-break:break-word; }
+  .note-in { margin-top:10px; background:var(--bg-card); border:1px solid rgba(59,130,246,.4); border-radius:12px; padding:10px 12px; font-size:13.5px; color:var(--text); min-height:44px; outline:none; }
+  .note-in:empty::before { content:'给这条引用加一句注解（可选）…'; color:var(--text-3); }
+  .save-row { display:flex; gap:9px; margin-top:12px; }
+  .save-row button { flex:1; border:none; border-radius:12px; padding:12px 0; font-size:14px; font-weight:650; font-family:var(--font); }
+  .save-row .y { background:var(--accent); color:#fff; }
+  .save-row .n { background:rgba(255,255,255,.08); color:var(--text-2); }
+  .composer { flex:none; border-top:.5px solid var(--line); background:var(--bg); }
+  .composer .crow { display:flex; align-items:center; gap:8px; padding:8px 10px 12px; }
+  .composer .in { flex:1; background:var(--bg-card); border:1px solid var(--line); border-radius:20px; padding:9px 13px; font-size:13px; color:var(--text-2); }
+  .composer .cbtn { width:36px; height:36px; border-radius:50%; border:none; display:flex; align-items:center; justify-content:center; font-size:15px; flex:none; }
+  .cbtn.ghost { background:var(--bg-card); color:var(--text-2); }
+  .cbtn.acc { background:var(--accent); color:#fff; }
+  .cbtn.prev { width:auto; border-radius:18px; padding:0 12px; font-size:11.5px; font-weight:600; height:30px; align-self:center; background:var(--bg-card); color:#6aa6ff; border:1px solid rgba(59,130,246,.4); }
+  /* 发送预览 */
+  .preview-sec { font-size:11px; font-weight:700; color:var(--text-3); padding:4px 2px 8px; }
+  .preview-md { background:var(--bg-card); border:.5px solid var(--line); border-radius:12px; padding:11px 13px; font-size:12.5px; line-height:1.7; color:var(--text-2); white-space:pre-wrap; word-break:break-word; font-family:var(--mono); }
+  /* 引用块在气泡里的呈现 */
+  .ubub .qblk { border-left:2.5px solid rgba(255,255,255,.55); padding-left:9px; margin-bottom:7px; font-size:12.5px; opacity:.85; }
+  .ubub .qnote { border-left:2.5px solid var(--orange); padding-left:9px; margin-bottom:7px; font-size:12.5px; color:#ffd9a0; }
+  /* 选段（方案 C） */
+  .selspan { background:rgba(59,130,246,.22); border-radius:4px; padding:1px 0; }
+  .sec { padding:6px 4px 8px; font-size:12px; font-weight:700; color:var(--text-3); }
+  .pros { margin-top:11px; }
+  .pros .li { display:flex; gap:8px; font-size:12.5px; line-height:1.65; color:var(--text-2); margin-bottom:5px; }
+  .pros .li b { color:var(--text); font-weight:600; }
+  .pros .li .k { flex:none; width:15px; }
+  .pros .li.good .k { color:var(--green); }
+  .pros .li.bad .k { color:var(--red); }
+  .pros .li.cost .k { color:var(--orange); }
+  .full { flex-basis:100%; max-width:1300px; }
+  .card { background:var(--bg-card); border:.5px solid var(--line); border-radius:16px; padding:16px 18px; margin-bottom:14px; }
+  .card h2 { font-size:15.5px; margin-bottom:4px; }
+  .card .d { font-size:12.5px; color:var(--text-3); line-height:1.7; margin-bottom:12px; }
+  table { width:100%; border-collapse:collapse; font-size:12px; }
+  th,td { text-align:left; padding:9px 8px; border-bottom:.5px solid var(--line); vertical-align:top; line-height:1.6; }
+  th { color:var(--text-3); font-size:11.5px; font-weight:600; }
+  .rec { border-color:rgba(52,199,89,.4); background:rgba(52,199,89,.06); }
+  .rec h2 { color:var(--green); }
+  .pick { display:flex; gap:9px; flex-wrap:wrap; margin-top:6px; }
+  .pick label { display:flex; gap:8px; align-items:center; font-size:12.5px; padding:9px 12px; border:1px solid var(--line); border-radius:12px; background:var(--bg-elev); cursor:pointer; }
+  .pick label.sel { border-color:var(--accent); background:var(--accent-soft); }
+  .pick input { accent-color:#3b82f6; }
+</style>
+</head>
+<body>
+
+<div class="head">
+  <h1>任意内容引用 · 方案原型</h1>
+  <div class="sub">
+    目标：对话里<b>任何内容</b>——你自己的话、agent 的回答、工具调用、命令输出——都能变成「引用」，加一句自己的注解，
+    一条消息里可带多条引用，作为下一轮的上下文。<br>
+    调研结论：Codex 是「选中文本 → Add to chat」（[codex#37560](https://github.com/openai/codex/issues/37560)），微信是「引用条前置」，
+    Claude Code 目前还没有像样的原生引用 UI（[claude-code#26716](https://github.com/anthropics/claude-code/issues/26716)）。
+  </div>
+  <div class="quote"><b>协议上限（已核实）</b>：DSH 的 prompt 只收 text / image / file 三种块，<b>没有结构化引用类型</b>。
+  所以引用最终都会拼进文本发给模型——原型里每个方案都有「发送预览」，所见即模型所得。</div>
+</div>
+
+<div class="bar">
+  <a href="#qa">A chips + 注解（推荐）</a><a href="#qb">B 微信式引用条</a><a href="#qc">C 选段引用</a><a href="#cmp">对比</a>
+</div>
+
+<div class="stage" id="stage"></div>
+
+<div class="stage" style="display:block; max-width:1300px;">
+  <div class="card" id="cmp">
+    <h2>三个方案对比</h2>
+    <table>
+      <tr><th>方案</th><th>引用入口</th><th>引用形态</th><th>注解</th><th>多引用</th><th>主要取舍</th></tr>
+      <tr><td><b>A chips + 注解</b>（推荐）</td><td>点按任意内容出操作条</td><td>输入框上方一排 chips（类型图标+摘要）</td><td>点 chip 单独加</td><td>✓ 横滑并列</td><td>交互最全，实现也最大（约 350 行）</td></tr>
+      <tr><td><b>B 微信式引用条</b></td><td>同上</td><td>输入框上方堆叠条（原文+✕）</td><td>写在正文里</td><td>✓ 堆叠</td><td>最简单（约 150 行），但多引用时占地方、注解和引用不挂钩</td></tr>
+      <tr><td><b>C 选段引用</b></td><td>长按选择文本片段</td><td>精确到片段</td><td>同 A</td><td>✓</td><td>最精准但手机上选择文本很费手，适合作为 A 的后续增强</td></tr>
+    </table>
+  </div>
+  <div class="card rec">
+    <h2>我的建议：A，发送编排用「引用块 + 【注】」</h2>
+    <div class="d" style="margin-bottom:8px">
+      发送时自动拼成（发送预览里就是实物）：<br>
+      <code style="font-size:12px">&gt; [用户] 周转率按门店在售天数对齐，别按自然月<br>【注】按这个口径继续<br><br>&gt; [工具·bash] python extract_store_structure.py<br>【注】数据源入口<br><br>把口径说明补进页面</code><br>
+      引用块用 markdown 的 <code>&gt;</code>（app 里本来就会渲染成竖线引用样式），来源标 [用户]/[助手]/[工具·名]，注解用【注】紧跟其后——模型读得懂，人也看得懂。
+    </div>
+    <div class="pick" id="pick">
+      <label><input type="radio" name="q" value="A" checked> A chips + 注解（推荐）</label>
+      <label><input type="radio" name="q" value="B"> B 微信式引用条</label>
+      <label><input type="radio" name="q" value="AB"> A 为主 + 发送格式换成 B 的极简前置</label>
+      <label><input type="radio" name="q" value="AC"> A + 以后补 C 的选段</label>
+    </div>
+    <div style="font-size:12px;color:var(--text-3);margin-top:10px">选好告诉我，我按这个实现。</div>
+  </div>
+</div>
+
+<script>
+const el2 = (tag, cls, text) => { const d = document.createElement(tag); if (cls) d.className = cls; if (text != null) d.textContent = text; return d }
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
+
+const CONTENT = [
+  { kind: 'user', text: '把门店级产品结构分析做出来，先摸清数据源' },
+  { kind: 'assistant', text: '好，我先看数据源和现有页面。' },
+  { kind: 'tool', name: 'bash', cmd: 'python extract_store_structure.py', result: 'warehouse,sku,sales,stock,returns\nWH-001,SKU-1002,184320,5102,861\nWH-002,SKU-1002,162044,4887,720\n…共 312 行' },
+  { kind: 'assistant', text: '数据已抽到门店级。周转率我先按「销量 ÷ 自然月」算了一版，但闭店月会被低估，建议改成「销量 ÷ 在售天数」。' },
+  { kind: 'user', text: '周转率那个口径按门店在售天数对齐，别按自然月' },
+  { kind: 'assistant', text: '明白，周转率统一改成 销量 ÷ 在售天数。门店维度表里有 open_days 字段，可以直接对齐。' },
+  { kind: 'tool', name: 'edit', cmd: 'analysis/store_report.html', result: '已写入 86 行，删除 12 行' },
+]
+const TYPE_ICON = { user: '你', assistant: 'AI', tool: '⌘' }
+const TYPE_LABEL = { user: '用户', assistant: '助手', tool: '工具' }
+
+function phoneShell() {
+  const p = el2('div', 'phone')
+  p.innerHTML = `<div class="navbar"><span class="bk">‹</span><div class="mid"><div class="tt">门店级产品结构分析</div></div><span class="nb">⋯</span></div>
+    <div class="scroll" data-scroll></div>
+    <div class="tap-hint" data-hint>点任意气泡/工具卡试试</div>`
+  return p
+}
+function renderChat(sc, quoted) {
+  sc.textContent = ''
+  for (const c of CONTENT) {
+    if (c.kind === 'user') {
+      const b = el2('div', 'ubub')
+      b.dataset.ref = JSON.stringify(c)
+      b.textContent = c.text
+      sc.appendChild(b)
+      sc.appendChild(el2('div', 'meta-r', '12:0' + CONTENT.indexOf(c)))
+    } else if (c.kind === 'assistant') {
+      const b = el2('div', 'abot')
+      b.dataset.ref = JSON.stringify(c)
+      b.textContent = c.text
+      sc.appendChild(b)
+      sc.appendChild(el2('div', 'meta-r meta-l', '12:0' + CONTENT.indexOf(c)))
+    } else {
+      const t = el2('div', 'tool')
+      t.dataset.ref = JSON.stringify(c)
+      t.innerHTML = `<div class="th"><span class="ti">${c.name === 'bash' ? '▸' : '✎'}</span>${c.name}<span class="ok">✓</span></div><div class="tc">${esc(c.cmd)}</div>`
+      sc.appendChild(t)
+    }
+  }
+  if (quoted) renderQuotedBubble(sc, quoted)
+}
+function excerpt(c) {
+  if (c.kind === 'tool') return c.cmd + (c.result ? ' ⏎ ' + c.result.split('\n')[0] : '')
+  return c.text
+}
+function typeOf(c) { return c.kind === 'tool' ? 'tool' : c.kind }
+function compose(refs, body) {
+  const parts = []
+  for (const r of refs) {
+    const label = r.type === 'tool' ? `工具·${r.raw.name}` : TYPE_LABEL[r.type]
+    parts.push(`> [${label}] ${excerpt(r.raw).replace(/\n/g, '\n> ')}`)
+    if (r.note && r.note.trim()) parts.push(`【注】${r.note.trim()}`)
+    parts.push('')
+  }
+  if (body && body.trim()) parts.push(body.trim())
+  return parts.join('\n')
+}
+function renderQuotedBubble(sc, { refs, body }) {
+  const b = el2('div', 'ubub')
+  for (const r of refs) {
+    const blk = el2('div', 'qblk')
+    const label = r.type === 'tool' ? `工具·${r.raw.name}` : TYPE_LABEL[r.type]
+    blk.textContent = `[${label}] ` + excerpt(r.raw).split('\n')[0]
+    b.appendChild(blk)
+    if (r.note && r.note.trim()) b.appendChild(el2('div', 'qnote', '【注】' + r.note.trim()))
+  }
+  b.appendChild(el2('div', null, body))
+  sc.appendChild(b)
+  sc.appendChild(el2('div', 'meta-r', '刚刚'))
+  sc.scrollTop = sc.scrollHeight
+}
+
+/* ============ 方案 A：chips + 每条注解 ============ */
+function phoneA() {
+  const p = phoneShell()
+  const sc = p.querySelector('[data-scroll]')
+  const refs = []
+  /* 引用 chips 条 */
+  const qstrip = el2('div', 'qstrip')
+  qstrip.style.display = 'none'
+  const comp = el2('div', 'composer')
+  comp.innerHTML = `<div class="crow"><button class="cbtn ghost">＋</button><div class="in" data-in contenteditable></div><button class="cbtn prev" data-prev>预览</button><button class="cbtn acc" data-send>↑</button></div>`
+  p.append(qstrip, comp)
+  /* 注解面板 */
+  const ov = el2('div', 'ov'); const sheet = el2('div', 'sheet')
+  sheet.innerHTML = `<div class="grabber"></div><div class="sheet-body" data-sb></div>`
+  p.append(ov, sheet)
+  const closeSheet = () => { ov.classList.remove('open'); sheet.classList.remove('open') }
+  ov.onclick = (e) => { if (e.target === ov) closeSheet() }
+  const refreshChips = () => {
+    qstrip.style.display = refs.length ? '' : 'none'
+    qstrip.textContent = ''
+    refs.forEach((r, i) => {
+      const ch = el2('div', 'qchip')
+      const label = r.type === 'tool' ? r.raw.name : TYPE_LABEL[r.type]
+      ch.innerHTML = `<span class="qi ${r.type === 'user' ? 'u' : ''}">${r.type === 'tool' ? '⌘' : TYPE_ICON[r.type]}</span><span class="qt">${esc(label + ' · ' + excerpt(r.raw).slice(0, 18))}…</span>${r.note && r.note.trim() ? '<span class="note"></span>' : ''}<span class="x">✕</span>`
+      ch.querySelector('.x').onclick = (e) => { e.stopPropagation(); refs.splice(i, 1); refreshChips() }
+      ch.onclick = () => openNote(i)
+      qstrip.appendChild(ch)
+    })
+  }
+  const openNote = (i) => {
+    const r = refs[i]
+    const sb = sheet.querySelector('[data-sb]')
+    const label = r.type === 'tool' ? `工具 · ${r.raw.name}` : TYPE_LABEL[r.type]
+    sb.innerHTML = `<div class="sheet-title">引用 · ${label}<span class="x">✕</span></div>
+      <div class="qfull">${esc(r.kind === 'tool' || r.raw.cmd ? (r.raw.cmd || '') + (r.raw.result ? '\n' + r.raw.result : '') : r.raw.text)}</div>
+      <div class="note-in" contenteditable>${r.note ? esc(r.note) : ''}</div>
+      <div class="save-row"><button class="n" data-x>删除引用</button><button class="y" data-ok>保存注解</button></div>`
+    sb.querySelector('.sheet-title .x').onclick = closeSheet
+    sb.querySelector('[data-x]').onclick = () => { refs.splice(i, 1); refreshChips(); closeSheet() }
+    sb.querySelector('[data-ok]').onclick = () => { r.note = sb.querySelector('.note-in').textContent; refreshChips(); closeSheet() }
+    ov.classList.add('open'); sheet.classList.add('open')
+  }
+  /* 点按任意内容 → 操作条 */
+  sc.addEventListener('click', (e) => {
+    const t = e.target.closest('.ubub, .abot, .tool')
+    if (!t || !t.dataset.ref) return
+    const old = p.querySelector('.apop'); if (old) old.remove()
+    const c = JSON.parse(t.dataset.ref)
+    const pop = el2('div', 'apop')
+    pop.innerHTML = `<button class="y" data-q>❝ 引用这条</button><button>⧉ 复制</button>`
+    const r = t.getBoundingClientRect(), pr = p.getBoundingClientRect()
+    pop.style.left = Math.max(10, Math.min(r.left - pr.left, 390 - 150)) + 'px'
+    pop.style.top = (r.top - pr.top - 42) + 'px'
+    p.appendChild(pop)
+    pop.querySelector('[data-q]').onclick = () => {
+      pop.remove()
+      if (refs.length >= 6) { showHint('最多 6 条引用'); return }
+      refs.push({ type: typeOf(c), raw: c, note: '' })
+      refreshChips()
+      openNote(refs.length - 1)
+    }
+    pop.querySelector('button:not([data-q])').onclick = () => pop.remove()
+    setTimeout(() => { document.addEventListener('click', function h(ev) { if (!pop.contains(ev.target)) { pop.remove(); document.removeEventListener('click', h) } }) }, 10)
+  })
+  const showHint = (t) => { const h = p.querySelector('[data-hint]'); h.textContent = t; h.classList.add('show'); setTimeout(() => h.classList.remove('show'), 2200) }
+  /* 发送预览 */
+  const openPreview = () => {
+    const body = comp.querySelector('[data-in]').textContent
+    const sb = sheet.querySelector('[data-sb]')
+    sb.innerHTML = `<div class="sheet-title">发送预览 · 模型实际收到的文本<span class="x">✕</span></div>
+      <div class="preview-sec">${refs.length} 条引用 + 正文 · 拼成纯文本（协议只有 text/image/file）</div>
+      <div class="preview-md">${esc(compose(refs, body))}</div>
+      <div class="save-row"><button class="n" data-b>返回编辑</button><button class="y" data-s>确认发送</button></div>`
+    sb.querySelector('.sheet-title .x').onclick = closeSheet
+    sb.querySelector('[data-b]').onclick = closeSheet
+    sb.querySelector('[data-s]').onclick = () => {
+      closeSheet()
+      renderChat(p.querySelector('[data-scroll]'), { refs: refs.slice(), body })
+      refs.length = 0; refreshChips()
+      comp.querySelector('[data-in]').textContent = ''
+      showHint('已发送（真实环境进入队列/立即发送）')
+    }
+    ov.classList.add('open'); sheet.classList.add('open')
+  }
+  comp.querySelector('[data-prev]').onclick = openPreview
+  comp.querySelector('[data-send]').onclick = () => { if (refs.length) openPreview() }
+  renderChat(sc)
+  setTimeout(() => showHint('点任意气泡/工具卡试试'), 700)
+  return p
+}
+
+/* ============ 方案 B：微信式引用条 ============ */
+function phoneB() {
+  const p = phoneShell()
+  const sc = p.querySelector('[data-scroll]')
+  const refs = []
+  const qwrap = el2('div')
+  const comp = el2('div', 'composer')
+  comp.innerHTML = `<div class="crow"><button class="cbtn ghost">＋</button><div class="in" data-in contenteditable></div><button class="cbtn acc" data-send>↑</button></div>`
+  const qc = el2('div')
+  qc.append(qwrap, comp)
+  p.appendChild(qc)
+  const ov = el2('div', 'ov'); const sheet = el2('div', 'sheet')
+  sheet.innerHTML = `<div class="grabber"></div><div class="sheet-body" data-sb></div>`
+  p.append(ov, sheet)
+  const closeSheet = () => { ov.classList.remove('open'); sheet.classList.remove('open') }
+  ov.onclick = (e) => { if (e.target === ov) closeSheet() }
+  const refresh = () => {
+    qwrap.textContent = ''
+    refs.forEach((r, i) => {
+      const bar = el2('div', 'qbar')
+      const label = r.type === 'tool' ? `工具·${r.raw.name}` : TYPE_LABEL[r.type]
+      bar.innerHTML = `<span class="qt">[${label}] ${esc(excerpt(r.raw))}</span><span class="x">✕</span>`
+      bar.querySelector('.x').onclick = () => { refs.splice(i, 1); refresh() }
+      qwrap.appendChild(bar)
+    })
+  }
+  sc.addEventListener('click', (e) => {
+    const t = e.target.closest('.ubub, .abot, .tool')
+    if (!t || !t.dataset.ref) return
+    const old = p.querySelector('.apop'); if (old) old.remove()
+    const c = JSON.parse(t.dataset.ref)
+    const pop = el2('div', 'apop')
+    pop.innerHTML = `<button class="y" data-q>❝ 引用</button><button>⧉ 复制</button>`
+    const r = t.getBoundingClientRect(), pr = p.getBoundingClientRect()
+    pop.style.left = Math.max(10, Math.min(r.left - pr.left, 390 - 150)) + 'px'
+    pop.style.top = (r.top - pr.top - 42) + 'px'
+    p.appendChild(pop)
+    pop.querySelector('[data-q]').onclick = () => { pop.remove(); refs.push({ type: typeOf(c), raw: c }); refresh() }
+    pop.querySelector('button:not([data-q])').onclick = () => pop.remove()
+    setTimeout(() => { document.addEventListener('click', function h(ev) { if (!pop.contains(ev.target)) { pop.remove(); document.removeEventListener('click', h) } }) }, 10)
+  })
+  comp.querySelector('[data-send]').onclick = () => {
+    const body = comp.querySelector('[data-in]').textContent
+    if (!refs.length && !body.trim()) return
+    const sb = sheet.querySelector('[data-sb]')
+    sb.innerHTML = `<div class="sheet-title">发送预览<span class="x">✕</span></div>
+      <div class="preview-md">${esc(refs.map((r) => `> [${r.type === 'tool' ? '工具·' + r.raw.name : TYPE_LABEL[r.type]}] ${excerpt(r.raw).split('\n')[0]}`).join('\n') + (body.trim() ? '\n\n' + body.trim() : ''))}</div>
+      <div class="save-row"><button class="n" data-b>返回编辑</button><button class="y" data-s>确认发送</button></div>`
+    sb.querySelector('.sheet-title .x').onclick = closeSheet
+    sb.querySelector('[data-b]').onclick = closeSheet
+    sb.querySelector('[data-s]').onclick = () => {
+      closeSheet()
+      renderChat(p.querySelector('[data-scroll]'), { refs: refs.map((r) => ({ ...r, note: '' })), body })
+      refs.length = 0; refresh()
+      comp.querySelector('[data-in]').textContent = ''
+    }
+    ov.classList.add('open'); sheet.classList.add('open')
+  }
+  renderChat(sc)
+  return p
+}
+
+/* ============ 方案 C：选段引用 ============ */
+function phoneC() {
+  const p = phoneShell()
+  const sc = p.querySelector('[data-scroll]')
+  renderChat(sc)
+  // 预置一段"被选中"的文字来演示选段
+  const target = Array.from(sc.querySelectorAll('.abot'))[1]
+  if (target) {
+    const txt = target.textContent
+    const frag = '销量 ÷ 在售天数'
+    const i = txt.indexOf(frag)
+    if (i >= 0) {
+      target.innerHTML = esc(txt.slice(0, i)) + `<span class="selspan">${esc(frag)}</span>` + esc(txt.slice(i + frag.length))
+    }
+  }
+  const refs = []
+  const qstrip = el2('div', 'qstrip'); qstrip.style.display = refs.length ? '' : 'none'
+  const comp = el2('div', 'composer')
+  comp.innerHTML = `<div class="crow"><button class="cbtn ghost">＋</button><div class="in" contenteditable></div><button class="cbtn acc">↑</button></div>`
+  p.append(qstrip, comp)
+  const refresh = () => {
+    qstrip.style.display = refs.length ? '' : 'none'
+    qstrip.textContent = ''
+    refs.forEach((r, i) => {
+      const ch = el2('div', 'qchip')
+      ch.innerHTML = `<span class="qi">❝</span><span class="qt">片段 · ${esc(r.text.slice(0, 16))}</span><span class="x">✕</span>`
+      ch.querySelector('.x').onclick = (e) => { e.stopPropagation(); refs.splice(i, 1); refresh() }
+      qstrip.appendChild(ch)
+    })
+  }
+  // 演示按钮：把选中片段变引用
+  const demo = el2('div', 'apop')
+  demo.innerHTML = `<button class="y">❝ 引用选中片段「销量 ÷ 在售天数」</button>`
+  demo.style.left = '30px'
+  if (target) {
+    const r = target.getBoundingClientRect(), pr = p.getBoundingClientRect()
+    demo.style.top = (r.bottom - pr.top + 6) + 'px'
+  }
+  p.appendChild(demo)
+  demo.querySelector('button').onclick = () => {
+    demo.remove()
+    refs.push({ text: '销量 ÷ 在售天数' })
+    refresh()
+  }
+  const note = el2('div', 'sec', '选中片段 → 一条精确引用；体验最准，但手机上「长按→拖两端选点」是所有方案里最费手的一步，建议作为 A 的后续增强而非主入口')
+  note.style.cssText = 'position:absolute;bottom:70px;left:12px;right:12px;font-size:11px;color:var(--orange);line-height:1.6;background:rgba(255,159,10,.08);border-radius:10px;padding:9px 11px'
+  p.appendChild(note)
+  return p
+}
+
+/* ============ 组装 ============ */
+const OPTS = [
+  { id: 'qa', tag: 'A', name: 'Codex 式 chips + 每条可注解', badge: '推荐', build: phoneA,
+    desc: '点任意气泡/工具卡 →「引用这条」→ 输入框上方出现类型化 chip（你/AI/⌘ 图标 + 摘要 + ✕）。点 chip 看全文并写注解（有注解的 chip 带橙点）。加多条后「预览」看模型实际收到的文本，再确认发送。',
+    pros: [['good','每条引用可独立注解','Codex「Add to chat + note」的完整形态'],['good','多引用横滑并列不占地方','chips 一排，再多也不挤正文'],['good','发送预览所见即所得','拼成什么样模型就收到什么，没有惊喜'],['good','类型可辨','用户/助手/工具各一个图标，模型也能拿到 [来源] 标签'],['bad','实现最大','操作条 + chips + 注解面板 + 编排（约 350 行）']], cost: '中：4 个组件，但全部复用现有 popover/sheet 语言' },
+  { id: 'qb', tag: 'B', name: '微信式引用条', badge: '', build: phoneB,
+    desc: '同样点任意内容引用，但变成输入框上方一条条堆叠的引用条（原文摘要 + ✕），注解不单独做（写在正文里）。发送时引用块极简前置。',
+    pros: [['good','最简单','没有注解面板，约 150 行'],['good','形态用户最熟','和微信引用一模一样'],['bad','多引用占地方','3 条引用就占掉半个屏幕高'],['bad','注解与引用不挂钩','哪句注哪条全靠模型猜']], cost: '低：操作条 + 堆叠条 + 极简编排' },
+  { id: 'qc', tag: 'C', name: '选段引用（精确片段）', badge: '谨慎', warn: true, build: phoneC,
+    desc: '长按选择文本片段 →「引用选中片段」→ 精确到几个字的引用（Codex 的选中文本形态）。原型里预置了一段被选中的「销量 ÷ 在售天数」演示。',
+    pros: [['good','最精确','几个字也能引，不用整条搬'],['bad','手机上选择费手','长按→拖两个选点，是全部方案里最累的一步'],['bad','和系统选择器打架','iOS 长按先出放大镜，自定义选择模式冲突']], cost: '不建议作为主入口；可作为 A 的后续增强（选中时优先给「引用此段」）' },
+]
+const stage = document.getElementById('stage')
+for (const o of OPTS) {
+  const box = el2('div', 'opt'); box.id = o.id
+  const head = el2('div', 'opt-head')
+  head.innerHTML = `<span class="opt-tag">${o.tag}</span><span class="opt-name"></span>${o.badge ? `<span class="rec-badge${o.warn ? ' warn' : ''}">${o.badge}</span>` : ''}`
+  head.querySelector('.opt-name').textContent = o.name
+  box.appendChild(head)
+  const d = el2('div', 'opt-desc'); d.textContent = o.desc; box.appendChild(d)
+  box.appendChild(o.build())
+  const pros = el2('div', 'pros')
+  pros.innerHTML = o.pros.map(([k, t, s2]) => `<div class="li ${k}"><span class="k">${k === 'good' ? '✓' : k === 'bad' ? '✕' : '·'}</span><span><b>${t}</b>：${s2}</span></div>`).join('') + `<div class="li cost"><span class="k">⚙</span><span>${o.cost}</span></div>`
+  box.appendChild(pros)
+  stage.appendChild(box)
+}
+document.querySelectorAll('#pick label').forEach((l) => {
+  l.onclick = () => setTimeout(() => {
+    document.querySelectorAll('#pick label').forEach((x) => x.classList.remove('sel'))
+    l.classList.add('sel')
+  }, 0)
+})
+</script>
+</body>
+</html>
