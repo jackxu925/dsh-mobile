@@ -409,6 +409,54 @@ function textOf(content) {
   if (!Array.isArray(content)) return ''
   return content.filter((b) => b && b.type === 'text' && typeof b.text === 'string').map((b) => b.text).join('')
 }
+/* ---- 轮级耗时：宿主 dsh-session-stats 与桌面轮尾面板的同款公式 ----
+   TTFT = 本轮最低步的「发出请求 → 首个 token」；解码时长 = 末 token 时间 − 首 token 时间；
+   速度 = Σ输出 token ÷ Σ解码时长（只统计同时有 usage 与首 token 的步）。
+   流的 compact 记录形如 {type:'chunk',time,chunk} 或打包 run {type:'text-chunks'|'reasoning-chunks'|'tool-call-chunks', time0, dt[], texts[]|args[], name?} */
+function isTokenDelta(chunk) {
+  if (!chunk) return false
+  switch (chunk.type) {
+    case 'text-delta': case 'reasoning-delta': return chunk.text !== ''
+    case 'tool-call-delta': return chunk.argumentsDelta !== '' || chunk.name !== undefined
+    default: return false
+  }
+}
+function runFirstTokenTime(run) {
+  if (!run) return null
+  if (run.type === 'tool-call-chunks' && run.name !== undefined) return run.time0
+  const frags = run.type === 'tool-call-chunks' ? (run.args || []) : (run.texts || [])
+  let time = run.time0
+  for (let i = 0; i < frags.length; i++) {
+    if (i > 0) time += (run.dt && run.dt[i - 1]) || 0
+    if (frags[i] !== '') return time
+  }
+  return null
+}
+function streamFirstTokenTime(stream) {
+  if (!Array.isArray(stream)) return null
+  for (const rec of stream) {
+    if (!rec) continue
+    const time = rec.type === 'chunk' ? (isTokenDelta(rec.chunk) ? rec.time : null) : runFirstTokenTime(rec)
+    if (time !== null && time !== undefined) return time
+  }
+  return null
+}
+function usageOutputTokens(usage) {
+  if (!usage || typeof usage !== 'object') return null
+  const v = usage.outputTokens
+  return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : null
+}
+/* 一步的耗时读数：{llmMs, ttftMs, decodeMs, outputTokens}（无数据的字段为 null） */
+function stepTiming(st, event, d) {
+  if (!st) return null
+  const first = st.first != null ? st.first : streamFirstTokenTime(d.stream)
+  return {
+    llmMs: Math.max(0, event.time - st.start),
+    ttftMs: first != null ? Math.max(0, first - st.start) : null,
+    decodeMs: first != null ? Math.max(0, event.time - first) : null,
+    outputTokens: usageOutputTokens(d.usage),
+  }
+}
 
 function foldEvent(s, event, view) {
   const t = event.type, d = event.data || {}
@@ -438,7 +486,43 @@ function foldEvent(s, event, view) {
       s.lastPreview = text || '[图片]'
       break
     }
+    case 'step/start':
+      // 一步开始：记下发请求的时刻，用来算 TTFT
+      s._step = { turn: d.turn, step: d.step, start: event.time, first: null }
+      break
+    case 'assistant/attempt': {
+      // 同一步可能有重试：首 token 时间只认第一次拿到的（与宿主 session-stats 一致）
+      const st = s._step
+      if (st && st.turn === d.turn && st.step === d.step && st.first == null) {
+        const first = streamFirstTokenTime(d.stream)
+        if (first != null) st.first = first
+      }
+      break
+    }
     case 'assistant/message': {
+      // 结算这一步的耗时读数（早退前先记账，纯思考步也要算）
+      const openStep = s._step && s._step.turn === d.turn && s._step.step === d.step ? s._step : null
+      if (openStep) {
+        const r = stepTiming(openStep, event, d)
+        s._step = null
+        const tt = s._turnTiming || (s._turnTiming = { llmMs: 0, ttftMs: null, ttftStep: null, decodeMs: 0, decodeTokens: 0, hasDecode: false })
+        tt.llmMs += r.llmMs
+        if (r.ttftMs !== null && (tt.ttftStep === null || d.step < tt.ttftStep)) { tt.ttftStep = d.step; tt.ttftMs = r.ttftMs }
+        if (r.decodeMs !== null && r.outputTokens !== null) { tt.decodeMs += r.decodeMs; tt.decodeTokens += r.outputTokens; tt.hasDecode = true }
+      }
+      // usage 也要按步累计：纯思考步/工具步不渲染成气泡，但它们的 token 不能丢
+      // （桌面的 deriveTurnTokenUsage 也是把本轮各次 attempt 的 usage 全部相加）
+      if (d.usage) {
+        const tu = s._turnUsage || (s._turnUsage = { input: 0, output: 0, total: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, has: false })
+        const u = d.usage
+        tu.input += u.inputTokens || 0
+        tu.output += u.outputTokens || 0
+        tu.total += u.totalTokens || 0
+        tu.cacheRead += u.cacheReadTokens || 0
+        tu.cacheWrite += u.cacheWriteTokens || 0
+        tu.reasoning += u.reasoningTokens || 0
+        tu.has = true
+      }
       const m = d.message || {}
       const text = textOf(m.content)
       const reasoning = (m.content || []).filter((b) => b && (b.type === 'reasoning' || b.type === 'thinking')).map((b) => b.text || '').join('')
@@ -499,35 +583,30 @@ function foldEvent(s, event, view) {
       }
       break
     }
-    case 'turn/start': s.running = true; s._curTurn = d.turn; s._turnStartAt = event.time; break
+    case 'turn/start':
+      s.running = true; s._curTurn = d.turn; s._turnStartAt = event.time
+      s._step = null
+      s._turnTiming = { llmMs: 0, ttftMs: null, ttftStep: null, decodeMs: 0, decodeTokens: 0, hasDecode: false }
+      s._turnUsage = null
+      break
     case 'turn/end': {
       s.running = false
-      // 轮级统计：turn/start→turn/end 的时长 + 本轮所有 assistant 步的 usage 汇总，挂到最后一条助手消息上
+      // 轮级统计：turn/start→turn/end 的时长 + 本轮各步 usage 汇总（事件驱动累计，纯思考/工具步不渲染但也要算）
       const durMs = s._turnStartAt ? Math.max(0, event.time - s._turnStartAt) : 0
       const curTurn = s._curTurn
-      let agg = null
+      const timing = s._turnTiming || null
+      const speed = timing && timing.hasDecode && timing.decodeMs > 0 ? timing.decodeTokens / (timing.decodeMs / 1000) : null
+      const agg = s._turnUsage || null   // 事件驱动累计：不渲染成气泡的思考步/工具步也算
       for (let i2 = s.items.length - 1; i2 >= 0; i2--) {
         const it2 = s.items[i2]
         if (it2.kind !== 'assistant' || it2.turn !== curTurn) continue
-        if (!agg) {
-          agg = { input: 0, output: 0, total: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, has: false }
-          for (let j = s.items.length - 1; j >= 0; j--) {
-            const aj = s.items[j]
-            if (aj.kind !== 'assistant' || aj.turn !== curTurn || !aj.usage) continue
-            const u = aj.usage
-            agg.input += u.inputTokens || 0
-            agg.output += u.outputTokens || 0
-            agg.total += u.totalTokens || 0
-            agg.cacheRead += u.cacheReadTokens || 0
-            agg.cacheWrite += u.cacheWriteTokens || 0
-            agg.reasoning += u.reasoningTokens || 0
-            agg.has = true
-          }
-        }
-        it2.turnStats = { durMs, agg, turn: curTurn }
+        it2.turnStats = { durMs, agg, turn: curTurn, timing, speed }
         break   // 只挂本轮最后一条
       }
       s._turnStartAt = null
+      s._step = null
+      s._turnTiming = null
+      s._turnUsage = null
       endLive(s, null, null)
       const r = d.reason || {}
       if (r.kind === 'error') {
@@ -1056,7 +1135,7 @@ function itemNode(s, item) {
         const ts = item.turnStats
         const dur = ts.durMs > 0 ? (ts.durMs / 1000).toFixed(1) + 's' : '—'
         const tok = ts.agg && ts.agg.has ? fmtTok(ts.agg.total) : '—'
-        const spd = ts.agg && ts.agg.has && ts.durMs > 0 ? Math.round(ts.agg.output / (ts.durMs / 1000)) + ' t/s' : ''
+        const spd = ts.speed ? Math.round(ts.speed) + ' t/s' : ''   // 解码速度（桌面 tokensPerSecond 同款）；没有解码采样就不显示
         const pill = el('button', 'stat-pill')
         pill.type = 'button'
         pill.setAttribute('aria-label', '本轮统计：' + dur + (spd ? ' · ' + spd : '') + ' · ' + tok)
@@ -2292,9 +2371,11 @@ function fmtCtxTok(n) {
 }
 function fmtDur(ms) {
   if (ms == null) return '—'
-  const m = Math.round(ms / 60000)
-  if (m < 60) return m + ' 分钟'
-  return (m / 60).toFixed(1) + ' 小时'
+  const s = ms / 1000
+  if (s < 60) return (Math.round(s * 10) / 10) + ' 秒'   // 桌面 formatDuration 同款：不足 1 分钟给秒，不再显示成「0 分钟」
+  const whole = Math.round(s)
+  if (whole < 3600) return Math.floor(whole / 60) + ' 分 ' + (whole % 60) + ' 秒'
+  return (whole / 3600).toFixed(1) + ' 小时'
 }
 
 /* 断线期间失效的审批/提问：常驻交代条（可关）。输入区上方，与排队条同一视觉语言 */
@@ -3020,9 +3101,11 @@ function openTurnStatsSheet(s, item) {
   const ts = item.turnStats
   if (!ts) return
   const agg = ts.agg || {}
+  const tm = ts.timing || {}
+  const sec = (ms) => (ms == null || !(ms >= 0)) ? '—' : (ms / 1000).toFixed(1) + ' 秒'
   const durS = ts.durMs > 0 ? (ts.durMs / 1000).toFixed(1) + ' 秒' : '—'
   const cacheHit = agg.has && agg.total > agg.output ? Math.round(agg.cacheRead / (agg.total - agg.output) * 1000) / 10 + '%' : '—'
-  const speed = agg.has && ts.durMs > 0 ? Math.round(agg.output / (ts.durMs / 1000)) + ' tok/s' : '—'
+  const speed = ts.speed ? Math.round(ts.speed) + ' tok/s' : '—'   // 解码速度：Σ输出 ÷ Σ解码时长（桌面同款）
   $('#ts-title').textContent = '第 ' + ts.turn + ' 轮统计'
   const body = $('#ts-body')
   body.textContent = ''
@@ -3030,14 +3113,14 @@ function openTurnStatsSheet(s, item) {
   const g1 = el('div', 'ts-grp', '消耗')
   const grid1 = el('div', 'kv-grid')
   if (agg.has) {
-    grid1.append(mk('输入（新增）', fmtTok(agg.input)), mk('缓存命中', cacheHit), mk('缓存读取', fmtTok(agg.cacheRead)), mk('输出', fmtTok(agg.output)))
+    grid1.append(mk('输入（新增）', fmtTok(agg.input)), mk('缓存命中', cacheHit), mk('缓存读取', fmtTok(agg.cacheRead)), mk('缓存写入', fmtTok(agg.cacheWrite)), mk('输出', fmtTok(agg.output)))
     if (agg.reasoning > 0) grid1.append(mk('其中思考', fmtTok(agg.reasoning)))
     if (agg.total > 0) grid1.append(mk('总上下文', fmtTok(agg.total)))
   } else grid1.append(mk('（无 usage 数据）', '—'))
   g1.appendChild(grid1)
   const g2 = el('div', 'ts-grp', '耗时')
   const grid2 = el('div', 'kv-grid')
-  grid2.append(mk('总时长', durS), mk('速度', speed))
+  grid2.append(mk('总时长', durS), mk('TTFT（首 token）', sec(tm.ttftMs)), mk('解码时长', sec(tm.decodeMs)), mk('速度', speed))
   g2.appendChild(grid2)
   const g3 = el('div', 'ts-grp', '模型')
   const route = el('div', 'ts-route')
