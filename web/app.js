@@ -959,6 +959,7 @@ function renderChat(s, forceScroll) {
     sc.appendChild(itemNode(s, item))
   }
   renderChatPending(s, sc)
+  reapplyFlash(s, sc)   // 跳转高亮跨重建续命
   syncLivePill(s)   // 运行中的轮：实时统计 pill（挂在刚刷出来的节点上）
   if (anchor) restoreAnchor(sc, anchor)
   refreshChatChrome(s)
@@ -1189,6 +1190,12 @@ function itemNodeInner(s, item) {
       return m
     }
     case 'tool': return toolNode(item)
+    case 'gap': {
+      // seek 跳转留下的未加载段：滚动靠近会自动补齐（fillGap），行本身只是个轻占位
+      const g = el('div', 'gap-row', '· 这一段还没加载 ·')
+      g.dataset.gap = '1'
+      return g
+    }
     case 'think': {
       // 兜底形态：只有思考没有正文，且后面没有内容可挂 → 一行极简入口，不是空泡泡
       const row = el('div', 'think-row')
@@ -3466,7 +3473,7 @@ async function jumpToItem(s, ref) {
     (ref.seq == null && ref.time != null && it.time === ref.time) ||
     (ref.seq == null && ref.time == null && (it.text || '').slice(0, 24) === (ref.text || '').slice(0, 24))
   )
-  s.follow = false   // 跳转=看历史：置 follow=false，运行中的会话不会在下一次渲染时把位置拽回底部
+  s.follow = false
   const sc = chatScrollEl()
   const locate = () => {
     const item = s.items.find(match)
@@ -3487,7 +3494,13 @@ async function jumpToItem(s, ref) {
   let node = locate()
   if (!node && s.items.some(match)) { renderChat(s); node = locate() }   // DOM 还没刷出来：补一次重建再找
   if (!node) {
-    // 不在窗口：往前翻页找，找到后一次性重建再定位
+    if (await seekToQuestion(s, ref).catch(() => false)) {
+      renderChat(s)
+      node = locate()
+    }
+  }
+  if (!node) {
+    // 不在窗口：往前翻页找，找到后一次性重建再定位（兜底路径）
     let guard = 0
     while (!s.items.some(match) && s.hasMore && guard++ < 300) {
       // 预取链上可能正有一页在飞：等它落地，不占翻页名额
@@ -3500,10 +3513,84 @@ async function jumpToItem(s, ref) {
   }
   if (!node) return
   node.scrollIntoView({ block: 'center', behavior: 'auto' })   // 必须瞬时定位（smooth 动画会被 80ms 一轮的重建销毁目标节点而中断）
+  flashJumped(s, node)
+}
+/* 跳转高亮：运行中的会话每 ~80ms 重建一次 DOM，闪一下立刻就被抹掉——
+   记下 key 与截止时间，renderChat 重建后把高亮补挂回去，保证肉眼可见 */
+function flashJumped(s, node) {
+  const k = node.dataset.k || node.dataset.q || ''
+  s._flashKey = k
+  s._flashUntil = Date.now() + 1800
   node.classList.remove('q-flash')
   void node.offsetWidth
   node.classList.add('q-flash')
-  setTimeout(() => node.classList.remove('q-flash'), 1800)
+  setTimeout(() => { s._flashUntil = 0; document.querySelectorAll('.q-flash').forEach((n) => n.classList.remove('q-flash')) }, 1800)
+}
+function reapplyFlash(s, sc) {
+  if (!s._flashKey || Date.now() > (s._flashUntil || 0)) return
+  const n = sc.querySelector('[data-k="' + s._flashKey + '"]') || sc.querySelector('[data-q="' + s._flashKey + '"]')
+  if (n) n.classList.add('q-flash')
+}
+/* ================= seek 跳转：一次往返直达目标提问所在的那一段 ================= */
+/* 旧跳转从窗口最旧处串行向前翻页，远目标要十几个来回（外网 2-5 秒）。
+   seek：目标提问 seq 已知（抽屉扫描缓存），它所在的一轮 = [目标 .. 下一条提问之前]，
+   一次 session/page（throughSeq=下一条提问-1）就能整段取回，插进窗口正确的位置；
+   两侧够不着的部分留 gap 占位行，滚动靠近时再按段补（fillGap）。API 只有向后翻页，这是能一次到位的唯一路径。 */
+async function seekToQuestion(s, ref) {
+  if (ref.seq == null) return false
+  const acc = qAcc(s)
+  const idx = acc.findIndex((it) => it.seq === ref.seq)
+  if (idx < 0) return false
+  const nextQ = acc[idx + 1]
+  if (!nextQ || nextQ.seq == null) return false   // 最后一条提问必在窗口内（快路径已处理）
+  // 插入位置与上界：目标在某个 gap 里就劈开那个 gap；在全局最旧之下就整体前插
+  const gap = s.items.find((it) => it && it.kind === 'gap' && it.from <= ref.seq && ref.seq < it.to)
+  const insertAt = gap ? s.items.indexOf(gap) : 0
+  const upperLimit = gap ? gap.to - 1 : s.oldestSeq - 1   // 块顶不能越过上方已加载的内容
+  let through = Math.min(nextQ.seq - 1, upperLimit)
+  let block = []
+  let firstSeq = null
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const v = await rpc('session/page', { request: { address: followAddress(s.id), throughSeq: through, maxMessages: 200 } })
+    const recs = (v.records || []).map((r) => r.event || r)
+    if (!recs.length) break
+    const tmp = { items: [], callArgs: s.callArgs, live: null, _todoCalls: new Set(), _pendingCalls: [], _thinkBuf: '' }
+    for (const e of recs) foldEvent(tmp, e)
+    block = tmp.items.concat(block)
+    firstSeq = recs[0].seq
+    if (firstSeq <= ref.seq) break          // 已经盖到目标提问
+    through = firstSeq - 1                  // 这轮回答比一页还长：再往前补一段（罕见）
+  }
+  if (firstSeq == null || firstSeq > ref.seq) return false
+  // 组装：[下方残余 gap?] + 块 + [上方残余 gap?]，替换插入点（或拼在最前）
+  const below = gap && firstSeq > gap.from ? [{ kind: 'gap', from: gap.from, to: firstSeq }] : []
+  const above = through + 1 < (gap ? gap.to : s.oldestSeq) ? [{ kind: 'gap', from: through + 1, to: gap ? gap.to : s.oldestSeq }] : []
+  const piece = below.concat(block, above)
+  if (gap) s.items.splice(insertAt, 1, ...piece)
+  else s.items = piece.concat(s.items)
+  if (!gap) s.oldestSeq = firstSeq
+  s.hasMore = true
+  s.follow = false
+  return true
+}
+/* 滚动靠近 gap 占位行时补一段：从 gap 上边界（新的一侧）向下取，永不重叠 */
+async function fillGap(s, gap) {
+  if (!gap || gap.kind !== 'gap' || gap._filling) return
+  gap._filling = true
+  try {
+    const v = await rpc('session/page', { request: { address: followAddress(s.id), throughSeq: gap.to - 1, maxMessages: 200 } })
+    const recs = (v.records || []).map((r) => r.event || r)
+    const i = s.items.indexOf(gap)
+    if (i < 0) return   // 窗口已重组（又一次跳转），这块 gap 不在了
+    if (!recs.length) { s.items.splice(i, 1); return }
+    const tmp = { items: [], callArgs: s.callArgs, live: null, _todoCalls: new Set(), _pendingCalls: [], _thinkBuf: '' }
+    for (const e of recs) foldEvent(tmp, e)
+    const cut = recs[0].seq
+    // 残余 gap 是「填不到底的下方」[gap.from..cut)，排在补进来的内容之前（时间更早）
+    const refill = cut > gap.from ? [{ kind: 'gap', from: gap.from, to: cut }] : []
+    s.items.splice(i, 1, ...refill.concat(tmp.items))
+    renderChat(s)
+  } catch (e) {} finally { if (gap) gap._filling = false }
 }
 /* ================= 消息分叉（移植桌面端轮尾 branch） ================= */
 /* 桌面语义：forkAt(seq) → 服务端找 ≥seq 的 turn/end，历史切到该轮结束；
@@ -4174,6 +4261,15 @@ function buildShell() {
     if (sc._anchor && sc._anchor.key) { const n = sc.querySelector('[data-k="' + sc._anchor.key + '"]'); if (n) sc._anchor.top = n.getBoundingClientRect().top }
     const userScrolled = Date.now() - (sc._selfScrollAt || 0) > 200
     updateJumpPill()
+    // seek 留下的未加载段：占位行靠近视野就补一段（一次 200 条，无缝衔接）
+    if (userScrolled && S.current) {
+      const s2 = sess(S.current)
+      const g = s2.items.find((it) => it && it.kind === 'gap')
+      if (g && !g._filling) {
+        const gn = sc.querySelector('.gap-row')
+        if (gn) { const r = gn.getBoundingClientRect(); if (r.top < window.innerHeight + sc.clientHeight * 1.2) fillGap(s2, g) }
+      }
+    }
     // 上滑预取：离顶还有 ~2 屏就开始拉更早的内容（不必等滚到顶），用户手势期间可连续补几页
     if (userScrolled && S.current) { prefetchChain = 0; maybeLoadEarlier(sess(S.current)) }
   }, { passive: true })

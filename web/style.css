@@ -240,6 +240,7 @@ html.light .empty-state .empty-clear { color: var(--info); }
 .queue-chip .q-text { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:64vw; }
 
 /* 日期分隔条 */
+.gap-row { align-self:center; font-size:11.5px; color:var(--text-3); background:var(--bg-card); border:.5px dashed var(--line); padding:3px 14px; border-radius:12px; margin:2px 0; }
 .day-sep {
   align-self:center; font-size:11.5px; color:var(--text-3);
   background:var(--bg-card); border:.5px solid var(--line);
