@@ -1885,20 +1885,19 @@ function prependItems(s, older, oldFirst) {
       new Date(oldFirst.time).toDateString() === new Date(lastTime).toDateString()) at.remove()
   if (!s.hasMore) { const h = sc.querySelector('.auto-load-hint'); if (h) h.remove() }
 }
-/* 上滑预取：别等贴到顶才开始加载（那时才插内容，观感就是「卡一下」）。
-   离顶还有 ~1.5 屏就拉下一页；拉完若还在预取带里就继续补（单次手势最多 8 页，防病态循环）。 */
+/* 上滑预取：始终保持视野上方有 ~2 屏内容（你在第一屏时就备好到第三屏、第二屏时到第四屏…），
+   别等贴到顶才开始拉。进预取带就连补，补到缓冲够为止（单次连补 ≤12 页防病态循环）。 */
 let prefetchChain = 0
 function maybeLoadEarlier(s) {
   const sc = chatScrollEl()
   if (!sc || !s || S.current !== s.id) return
   if (!s.hasMore || s._loadingEarlier) return
-  if (sc.scrollTop > sc.clientHeight * 1.5) { prefetchChain = 0; return }
-  if (Date.now() - (s._loadedAt || 0) < 150) return   // 刚插完一页：等布局落定再补下一页
-  if (prefetchChain >= 8) return
+  if (sc.scrollTop > sc.clientHeight * 2) { prefetchChain = 0; return }   // 缓冲够了（上方还有 ≥2 屏）
+  if (prefetchChain >= 12) return
   prefetchChain++
   loadEarlier(s).then(() => {
     if (!s.hasMore) { prefetchChain = 0; return }
-    maybeLoadEarlier(s)
+    maybeLoadEarlier(s)   // 缓冲还没够就继续补（连补不占用新手势名额）
   }).catch(() => { prefetchChain = 0 })
 }
 async function loadEarlier(s) {
