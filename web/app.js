@@ -558,8 +558,15 @@ function foldEvent(s, event, view) {
         if (!s.live || s.live.turn !== d.turn || s.live.step !== d.step) s.live = { turn: d.turn, step: d.step, texts: {} }
         s.live.texts[c.index] = (s.live.texts[c.index] || '') + c.text
         renderLive(s)
+      } else if ((c.type === 'reasoning-delta' || c.type === 'thinking-delta') && typeof c.text === 'string') {
+        // 思考流（事件路径）：与 WS 路径对称——中途进会话/断线续看时思考也能实时上屏（两路不同时激活，无重复）
+        if (!s.live || s.live.turn !== d.turn || s.live.step !== d.step) s.live = { turn: d.turn, step: d.step, texts: {} }
+        if (!s.live.reasoning) s.live.reasoning = {}
+        s.live.reasoning[c.index] = (s.live.reasoning[c.index] || '') + c.text
+        renderLive(s)
       } else if (c.type === 'block-end' && s.live && c.index !== undefined) {
         delete s.live.texts[c.index]
+        if (s.live.reasoning) delete s.live.reasoning[c.index]
       }
       break
     }
@@ -1319,6 +1326,8 @@ function liveReasoningText(s) {
 }
 function closeThink() {
   ovSet('think-overlay', false)
+  const dr = $('#think-drawer')
+  if (dr) dr.classList.remove('open')
   thinkDrawer.session = null; thinkDrawer.live = false
 }
 /* 抽屉打开期间，思考流增量实时灌入 */
@@ -3031,6 +3040,7 @@ function openNewModelSheet() {
   const render = (cat) => {
     const oldSc = list.querySelector('.mp-left') || list.querySelector('.mp-cols.one')
     if (oldSc) mpLeftScroll = oldSc.scrollTop   // 清空前读旧滚动
+    list.classList.add('mp-fit')   // 外层不滚、两栏各自滚
     list.textContent = ''
     const cur = newModelSel || cat.default || {}
     const apply = (g, mod, effort) => {
@@ -3207,6 +3217,7 @@ function openSubPanel(kind, title, build) {
   subPanelKind = kind
   $('#sub-title').textContent = title
   const body = $('#sub-body')
+  body.classList.remove('mp-fit')   // mp-fit：模型选择器专用的「外层不滚、两栏各自滚」布局
   body.textContent = ''
   body.scrollTop = 0
   build(body)
@@ -3344,6 +3355,7 @@ function renderModelPanel(s) {
   if (!body) return
   const oldSc = body.querySelector('.mp-left') || body.querySelector('.mp-cols.one')   // 清空前同步读旧滚动（事件有竞态，直接读最稳）
   if (oldSc) mpLeftScroll = oldSc.scrollTop
+  body.classList.add('mp-fit')   // 外层不再滚动：两栏各自滚（右栏内容短时触摸才不会把整块带着走）
   body.textContent = ''
   const m = s.models
   if (!m) { body.appendChild(el('div', 'sheet-note', '加载中…')); return }
@@ -4220,7 +4232,7 @@ function buildShell() {
     </div>
   </div>
   <div class="sheet-overlay" id="think-overlay" aria-hidden="true">
-    <div class="sheet think-sheet" role="dialog" aria-label="思考过程">
+    <div class="sheet think-sheet" id="think-drawer" role="dialog" aria-label="思考过程">
       <div class="grabber"></div>
       <div class="think-head">
         <span class="think-title">思考过程</span>
