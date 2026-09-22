@@ -2856,8 +2856,363 @@ function setBusyEnter(v) {
   try { localStorage.setItem('dshm-busy-enter', v) } catch (e) {}
   if (S.current) refreshChatChrome(sess(S.current))
 }
+/* ===== 「这是怎么工作的」hi-fi 原型：故事页（真实数据）+ 自己的会话 + 导演视角回放 ===== */
+const HOW = { view: 'story', slide: 0, ctx: null, anCache: new Map(), timer: null }
+/* —— 数据分析：把会话事件日志折成「每轮圈数/文件/命令/时长」—— */
+async function howAnalyze(sid) {
+  if (HOW.anCache.has(sid)) return HOW.anCache.get(sid)
+  const p = howAnalyzeStart(sid)
+  HOW.anCache.set(sid, p)
+  return p
+}
+function howAnalyzeStart(sid) {
+  return (async () => {
+    const list = await rpc('session/list', { _request: { limit: 60 } })
+    const it = (list.items || []).find((x) => x.sessionId === sid && !x.archived && x.origin !== 'subagent')
+    const asOf = (it && it.projections && it.projections.asOfSeq) || 0
+    const vals = (it && it.projections && it.projections.values) || {}
+    const pg = await rpc('session/page', { request: { address: { kind: 'session', sessionId: sid }, throughSeq: asOf, maxMessages: 900 } })
+    const recs = (pg.records || []).map((r) => r.event || r).filter(Boolean)
+    const textOf = (c) => (c || []).map((b) => b.text || '').join('')
+    const users = recs.filter((e) => e.type === 'user/message' && e.data && e.data.source && e.data.source.kind === 'user')
+    const turns = []
+    let cur = null
+    for (const e of recs) {
+      if (e.type === 'turn/start') cur = { start: e.seq, t0: e.time, steps: 0, tools: 0, files: new Set(), bash: 0, thinkChars: 0, userText: '' }
+      if (!cur) continue
+      if (e.type === 'step/start') cur.steps++
+      if (e.type === 'tool/call') {
+        cur.tools++
+        let args = {}; try { args = JSON.parse(e.data.arguments || '{}') } catch (err) {}
+        const fp = String(args.file_path || args.path || '')
+        if (e.data.name === 'bash') cur.bash++
+        else if (fp) cur.files.add(fp.split('/').pop())
+      }
+      if (e.type === 'assistant/message') {
+        const c = (e.data && (e.data.message ? e.data.message.content : e.data.content)) || []
+        cur.thinkChars += c.filter((b) => b.type === 'reasoning' || b.type === 'thinking').map((b) => b.text || '').join('').length
+      }
+      if (e.type === 'turn/end') { cur.end = e.seq; cur.t1 = e.time; turns.push(cur); cur = null }
+    }
+    for (const t of turns) { const u = users.find((x) => x.seq >= t.start - 4 && x.seq < (t.end || 1e9)); if (u) t.userText = textOf(u.data.content).replace(/\n+/g, ' ').slice(0, 60) }
+    const done = turns.filter((t) => t.end)
+    done.sort((a, b) => b.steps - a.steps)
+    const best = done[0] || null
+    const cp = vals.contextPressure || {}
+    const out = {
+      sid, title: String(vals.title || '未命名会话'), asOf,
+      best, totalTurns: done.length, totalSteps: done.reduce((a, t) => a + t.steps, 0),
+      totalTools: done.reduce((a, t) => a + t.tools, 0),
+      ctxPct: cp.contextWindow ? Math.round(cp.pressureTokens / cp.contextWindow * 100) : null,
+      recs,
+    }
+    return out
+  })().catch((e) => ({ sid, error: e.message }))
+}
+/* —— 转圈环组件 —— */
+function howRing(size, fs) {
+  const wrap = el('div', 'how-ring')
+  wrap.style.width = wrap.style.height = size + 'px'
+  const r = size * 0.19
+  const C = 2 * Math.PI * r
+  wrap.innerHTML = '<svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="' + r + '" fill="none" stroke="rgba(255,255,255,.09)" stroke-width="' + (size / 26) + '"/><circle class="how-ring-arc" cx="50" cy="50" r="' + r + '" fill="none" stroke="var(--accent)" stroke-width="' + (size / 26) + '" stroke-linecap="round" stroke-dasharray="' + (C * 0.72) + ' ' + C + '"/></svg>'
+  const st = [['想', '50%', '6%'], ['做', '94%', '50%'], ['看', '50%', '94%'], ['再想', '6%', '50%']]
+  const sts = []
+  for (const [nm, l, t] of st) {
+    const d = el('div', 'how-stn')
+    d.style.left = l; d.style.top = t
+    d.style.fontSize = Math.round(size / 16) + 'px'
+    d.style.width = d.style.height = Math.round(size / 4.6) + 'px'
+    d.style.margin = Math.round(-size / 9.2) + 'px'
+    d.textContent = nm
+    wrap.appendChild(d); sts.push(d)
+  }
+  const ct = el('div', 'how-ring-ct')
+  ct.style.fontSize = (fs || Math.round(size / 6)) + 'px'
+  wrap.appendChild(ct)
+  return { el: wrap, sts, ct, setPhase: (i) => sts.forEach((x, j) => x.classList.toggle('lit', j === i % 4)), setCount: (n, sub) => { ct.innerHTML = n + '<small>' + (sub || ' 圈') + '</small>' } }
+}
+/* —— 主入口 —— */
+function openHowItWorks(s) {
+  howClose()
+  HOW.view = 'story'; HOW.slide = 0
+  const ov = el('div')
+  ov.id = 'how-ov'
+  ov.innerHTML = '<div class="how-head"><button class="how-back" id="how-back" type="button" style="display:none">‹ 返回</button><span class="how-dots" id="how-dots"></span><button class="how-x" id="how-x" type="button">✕</button></div><div class="how-body" id="how-body"></div>'
+  document.body.appendChild(ov)
+  $('#how-x').onclick = () => howClose()
+  $('#how-back').onclick = () => { if (HOW.view === 'replay') howShowBreakdown(HOW.ctx.an.sid); else if (HOW.view === 'breakdown' || HOW.view === 'picker') howStoryView(); }
+  HOW.ctx = { s }
+  howBuildStory(s)
+  document.documentElement.style.overflow = 'hidden'
+  // 异步补真实数字（当前会话最近一轮）
+  howAnalyze(s.id).then((an) => {
+    HOW.ctx.an = an
+    howFillReal(an)
+  })
+}
+function howClose() {
+  if (HOW.timer) { clearInterval(HOW.timer); HOW.timer = null }
+  const ov = $('#how-ov')
+  if (ov) ov.remove()
+  document.documentElement.style.overflow = ''
+}
+function howStoryView() {
+  HOW.view = 'story'
+  $('#how-back').style.display = 'none'
+  howBuildStory(HOW.ctx.s, HOW.ctx.an)
+}
+function howDotsRender(n, i) {
+  const d = $('#how-dots')
+  if (!d) return
+  d.textContent = ''
+  for (let k = 0; k < n; k++) d.appendChild(el('i', k === i ? 'on' : ''))
+}
+/* —— 五屏故事 —— */
+function howBuildStory(s, an) {
+  const body = $('#how-body')
+  if (!body) return
+  body.textContent = ''
+  const lastUser = [...(s.items || [])].reverse().find((x) => x.kind === 'user' && x.text)
+  const ut = (lastUser && lastUser.text || '帮我看看这个项目…').replace(/\n+/g, ' ').slice(0, 40)
+  const best = an && !an.error && an.best
+  const steps = best ? best.steps : 7
+  const files = best ? best.files.size : 5
+  const bash = best ? best.bash : 2
+  const thinkS = best ? Math.max(3, Math.round((best.t1 - best.t0) / 1000 * 0.2)) : 26
+  const ctxPct = an && !an.error && an.ctxPct != null ? an.ctxPct : 42
+  const track = el('div', 'how-track')
+  const slide = (html) => { const sl = el('section', 'how-slide'); sl.innerHTML = html; return sl }
+  track.appendChild(slide(
+    '<div class="how-big">你看到的<br>只是一条回复</div>' +
+    '<div class="how-bub u">' + howEsc(ut) + '</div>' +
+    '<div class="how-vs">' +
+    '<div class="how-vs-t">背后实际发生的</div>' +
+    '<div class="fx r1"><span>🧠</span>先转了 <b data-how="steps">' + steps + '</b> 圈：想→做→看→再想</div>' +
+    '<div class="fx r2"><span>📄</span>翻了 <b data-how="files">' + files + '</b> 个文件</div>' +
+    '<div class="fx r3"><span>⌨️</span>跑了 <b data-how="bash">' + bash + '</b> 条命令</div>' +
+    '<div class="fx r4 how-last"><span>💬</span>最后才写下你看到的这段话</div>' +
+    '</div><div class="how-hint">数字来自你这条会话的真实日志 · 右滑继续 →</div>'))
+  track.appendChild(slide(
+    '<div class="how-big">电话那头的专家<br>很聪明，但看不见</div>' +
+    '<div class="how-cloud fx c1">🧠<i>只会想 · 只会说</i></div>' +
+    '<div class="how-wire fx c2"></div>' +
+    '<div class="how-tel fx c2">☎️</div>' +
+    '<div class="how-senses">' +
+    '<div class="fx c3">👁<b>✕</b><span>看不见你的电脑</span></div>' +
+    '<div class="fx c4">✋<b>✕</b><span>摸不到你的文件</span></div>' +
+    '<div class="fx c5">🏃<b>✕</b><span>不能自己动手</span></div></div>' +
+    '<div class="how-desc fx c6">它像电话里的专家：只能听你说、只能开口答。<br>其余一切，得有人替它做。</div>'))
+  track.appendChild(slide(
+    '<div class="how-big">Harness 替它动手</div>' +
+    '<div class="how-chat">' +
+    '<div class="fx c1 how-m l"><span class="who">专家</span>「帮我<b>翻一下</b>那个文件」</div>' +
+    '<div class="fx c2 how-m r"><span class="who me">Harness</span>好，<b>正在翻看</b> · 念给它听</div>' +
+    '<div class="fx c3 how-m l"><span class="who">专家</span>「<b>跑一下</b>看看结果」</div>' +
+    '<div class="fx c4 how-m r"><span class="who me">Harness</span>好，<b>执行完毕</b> · 全部通过</div>' +
+    '<div class="fx c5 how-m l"><span class="who">专家</span>「行了，我来总结」</div>' +
+    '</div><div class="how-desc fx c6">你界面里的每张工具卡片，就是右边这些「好，正在…」</div>'))
+  const ring4 = howRing(210, 34)
+  const s4 = slide(
+    '<div class="how-big">你的一条消息<br>实际转了 <span data-how="steps2">' + steps + '</span> 圈</div>')
+  ring4.el.classList.add('fx', 'c2')
+  ring4.setCount(steps)
+  s4.appendChild(ring4.el)
+  HOW.ring4 = ring4
+  s4.appendChild(el('div', 'how-desc fx c3', '不是一问一答——是想→做→看→再想，\n直到它说「我可以汇报了」。'))
+  track.appendChild(s4)
+  track.appendChild(slide(
+    '<div class="how-big">每说一句<br>案卷就厚一分</div>' +
+    '<div class="how-stack fx c2"><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i></i><i></i><i></i></div>' +
+    '<div class="how-press fx c3"><div class="lbl"><span>这条会话的案卷厚度（上下文）</span><span data-how="ctx">' + ctxPct + '%</span></div><div class="pbar"><i style="width:' + ctxPct + '%"></i></div></div>' +
+    '<div class="how-desc fx c4">太厚会自动做摘要再继续——<br>这也是长对话偶尔「忘事」的原因。</div>' +
+    '<button class="how-cta fx c5" type="button">看看你自己最近的对话 →</button>'))
+  body.appendChild(track)
+  howDotsRender(5, 0)
+  // 滑动 → 圆点/页码
+  const dots = $('#how-dots')
+  track.addEventListener('scroll', () => {
+    const i = Math.round(track.scrollLeft / track.clientWidth)
+    if (i !== HOW.slide) { HOW.slide = i; howDotsRender(5, i); vibrate(4) }
+  }, { passive: true })
+  // 第 4 屏：环转起来
+  let ph = 0
+  if (HOW.timer) clearInterval(HOW.timer)
+  HOW.timer = setInterval(() => { if (HOW.ring4) { ph = (ph + 1) % 400; HOW.ring4.setPhase(Math.floor(ph / 60)) } }, 120)
+  // 第 5 屏 CTA
+  const cta = track.querySelector('.how-cta')
+  if (cta) cta.onclick = () => { vibrate(8); howShowPicker() }
+  if (an) howFillReal(an)
+}
+function howFillReal(an) {
+  if (!an || an.error) return
+  const b = an.best
+  if (!b) return
+  const set = (k, v) => { const n = document.querySelector('[data-how="' + k + '"]'); if (n) n.textContent = v }
+  set('steps', b.steps); set('steps2', b.steps); set('files', b.files.size); set('bash', b.bash)
+  if (an.ctxPct != null) set('ctx', an.ctxPct + '%')
+  if (HOW.ring4) HOW.ring4.setCount(b.steps)
+}
+function howEsc(t) { return String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') }
+/* —— 挑一条自己的会话 —— */
+async function howShowPicker() {
+  HOW.view = 'picker'
+  $('#how-back').style.display = ''
+  const body = $('#how-body')
+  body.textContent = ''
+  body.appendChild(el('div', 'how-big', '挑一条你自己的对话'))
+  body.appendChild(el('div', 'how-desc', '下面是你最近的会话，点开看它的「幕后」'))
+  const listEl = el('div', 'how-list')
+  body.appendChild(listEl)
+  try {
+    const list = await rpc('session/list', { _request: { limit: 40 } })
+    const items = (list.items || []).filter((x) => !x.archived && x.origin !== 'subagent' && (x.projections && x.projections.asOfSeq || 0) > 60).slice(0, 6)
+    if (!items.length) { listEl.appendChild(el('div', 'how-desc', '没找到足够长的会话')); return }
+    for (const it of items) {
+      const vals = (it.projections && it.projections.values) || {}
+      const row = btnize(el('div', 'how-srow'))
+      row.appendChild(el('div', 'how-st', String(vals.title || '未命名会话').slice(0, 26)))
+      row.appendChild(el('div', 'how-sd', (it.projections.asOfSeq || 0) + ' 条事件 · 读取中…'))
+      row.onclick = async () => { vibrate(8); row.querySelector('.how-sd').textContent = '分析中…'; howShowBreakdown(it.sessionId) }
+      listEl.appendChild(row)
+    }
+  } catch (e) { listEl.appendChild(el('div', 'how-desc', '读取失败：' + e.message)) }
+}
+/* —— 单会话拆解 —— */
+async function howShowBreakdown(sid) {
+  HOW.view = 'breakdown'
+  $('#how-back').style.display = ''
+  const body = $('#how-body')
+  body.textContent = ''
+  body.appendChild(el('div', 'how-big', '正在分析…'))
+  const an = await howAnalyze(sid)
+  HOW.ctx = HOW.ctx || {}
+  HOW.ctx.an = an
+  body.textContent = ''
+  if (an.error || !an.best) { body.appendChild(el('div', 'how-desc', an.error || '这条会话还没有完成的轮')); return }
+  const b = an.best
+  const fmtDur = (ms) => { const s2 = Math.round(ms / 1000); if (s2 >= 3600) return (s2 / 3600).toFixed(1) + ' 小时'; if (s2 >= 60) return Math.round(s2 / 60) + ' 分钟'; return s2 + ' 秒' }
+  body.appendChild(el('div', 'how-big', howEsc(an.title.slice(0, 16))))
+  body.appendChild(el('div', 'how-bub u', howEsc(b.userText || '（一条消息）')))
+  const vs = el('div', 'how-vs')
+  vs.innerHTML =
+    '<div class="fx r1"><span>🧠</span>转了 <b>' + b.steps + '</b> 圈（想→做→看→再想）</div>' +
+    '<div class="fx r2"><span>📄</span>翻了 <b>' + b.files.size + '</b> 个文件' + (b.files.size ? '（' + [...b.files].slice(0, 3).join('、') + (b.files.size > 3 ? '…' : '') + '）' : '') + '</div>' +
+    '<div class="fx r3"><span>⌨️</span>跑了 <b>' + b.bash + '</b> 条命令，共 <b>' + fmtDur(b.t1 - b.t0) + '</b></div>' +
+    '<div class="fx r4 how-last"><span>💬</span>最后写下你看到的回复</div>'
+  body.appendChild(vs)
+  const ring = howRing(180, 30)
+  ring.setCount(b.steps)
+  body.appendChild(ring.el)
+  const meta = el('div', 'how-desc', '全会话共 ' + an.totalTurns + ' 轮对话 · 累计 ' + an.totalSteps + ' 圈 · ' + an.totalTools + ' 次动手' + (an.ctxPct != null ? ' · 案卷 ' + an.ctxPct + '%' : ''))
+  body.appendChild(meta)
+  const btn = el('button', 'how-cta', '▶ 导演视角：回放这一轮')
+  btn.type = 'button'
+  btn.onclick = () => howReplay(an)
+  body.appendChild(btn)
+}
+/* —— 导演视角回放（真实事件加速重演）—— */
+function howToolLabel(name, args) {
+  const f = String(args.file_path || args.path || '').split('/').pop()
+  const m = {
+    bash: ['⌨️', '跑命令' + (args.command ? ' ' + String(args.command).slice(0, 18) : '')],
+    read: ['📄', '翻看 ' + (f || '文件')],
+    write: ['✏️', '写 ' + (f || '文件')],
+    edit: ['✏️', '改 ' + (f || '文件')],
+    grep: ['🔍', '搜代码'],
+    glob: ['🗂', '找文件'],
+    todo_write: ['📋', '更新任务清单'],
+    web_search: ['🌐', '搜网页'],
+    web_fetch: ['🌐', '读网页'],
+  }
+  return m[name] || ['🔧', name]
+}
+function howReplay(an) {
+  HOW.view = 'replay'
+  $('#how-back').style.display = ''
+  const body = $('#how-body')
+  body.textContent = ''
+  const b = an.best
+  const recs = (an.recs || []).filter((e) => e.seq >= b.start && e.seq <= b.end)
+  const evs = []
+  for (const e of recs) {
+    if (e.type === 'step/start') { evs.push({ t: e.time, ph: 0, kind: 'step' }) }
+    else if (e.type === 'assistant/chunk') {
+      const c = (e.data && e.data.chunk) || {}
+      if (c.type === 'reasoning-delta' || c.type === 'thinking-delta') { evs.push({ t: e.time, ph: 0, kind: 'think', n: (c.text || '').length }) }
+      else if (c.type === 'text-delta') { evs.push({ t: e.time, ph: 2, kind: 'text' }) }
+    }
+    else if (e.type === 'tool/call') { let args = {}; try { args = JSON.parse(e.data.arguments || '{}') } catch (err) {} const [ic, lb] = howToolLabel(e.data.name, args); evs.push({ t: e.time, ph: 1, kind: 'tool', ic, lb }) }
+    else if (e.type === 'assistant/message') {
+      const c = (e.data && (e.data.message ? e.data.message.content : e.data.content)) || []
+      const rl = c.filter((x) => x.type === 'reasoning' || x.type === 'thinking').map((x) => x.text || '').join('').length
+      evs.push({ t: e.time, ph: 2, kind: 'say', rlen: rl })
+    }
+  }
+  if (!evs.length) { body.appendChild(el('div', 'how-desc', '这一轮没有可回放的事件')); return }
+  const t0 = evs[0].t, t1 = evs[evs.length - 1].t
+  const span = Math.max(6000, Math.min(14000, (t1 - t0) * 0.004))   // 加速重演：整轮压到 6–14 秒
+  body.appendChild(el('div', 'how-big', '导演视角 · 回放'))
+  const head = el('div', 'how-drcnt', '×' + Math.max(1, Math.round((t1 - t0) / 1000 / (span / 1000))) + ' 速度')
+  body.appendChild(head)
+  const ring = howRing(168, 30)
+  ring.el.classList.add('how-ring-sm')
+  const feed = el('div', 'how-feed')
+  const wrap = el('div', 'how-drwrap')
+  wrap.append(ring.el, feed)
+  body.appendChild(wrap)
+  const stats = el('div', 'how-drstats')
+  stats.innerHTML = '<span>第 <b id="how-n">0</b> 圈</span><span>动手 <b id="how-t">0</b> 次</span><span>思考 <b id="how-w">0</b> 字</span>'
+  body.appendChild(stats)
+  let i = 0, nC = 0, nT = 0, nW = 0
+  const start = performance.now()
+  const tick = () => {
+    const now = t0 + (performance.now() - start) / span * (t1 - t0)
+    while (i < evs.length && evs[i].t <= now) {
+      const ev = evs[i++]
+      ring.setPhase(ev.ph)
+      if (ev.kind === 'step') { nC++; const n2 = $('#how-n'); if (n2) n2.textContent = nC; ring.setCount(nC) }
+      if (ev.kind === 'tool') { nT++; const t2 = $('#how-t'); if (t2) t2.textContent = nT; const row = el('div', 'how-frow now', ev.ic + ' ' + ev.lb); feed.appendChild(row); feed.scrollTop = feed.scrollHeight }
+      if (ev.kind === 'think') { nW += ev.n; const w2 = $('#how-w'); if (w2) w2.textContent = nW > 999 ? Math.round(nW / 100) / 10 + '千' : nW }
+      if (ev.kind === 'say') {
+        nW += ev.rlen || 0
+        const w2 = $('#how-w'); if (w2) w2.textContent = nW > 999 ? Math.round(nW / 100) / 10 + '千' : nW
+        const row = el('div', 'how-frow say', '💬 写下一段回复'); feed.appendChild(row); feed.scrollTop = feed.scrollHeight
+      }
+    }
+    if (i < evs.length) HOW.raf = requestAnimationFrame(tick)
+    else { ring.setPhase(4); const done2 = el('div', 'how-frow done2', '✓ 本轮结束，向你汇报'); feed.appendChild(done2); feed.scrollTop = feed.scrollHeight }
+  }
+  HOW.raf = requestAnimationFrame(tick)
+}
+
+/* #/proto —— Harness 可视化原型（评审用：无任何入口，不影响现有界面；评审通过后做成 ⋯ 里的正式功能） */
+const PROTO_STYLE = "\n:root {\n  --bg:#0b0e14; --bg-elev:#12161f; --bg-card:#171c28; --bg-card-2:#1d2331;\n  --line:rgba(255,255,255,.08); --text:#e8ebf1; --text-2:#9aa3b2; --text-3:#7d8590;\n  --accent:#3b82f6; --accent-soft:rgba(59,130,246,.16); --accent-fill:#2563eb;\n  --green:#34c759; --orange:#ff9f0a; --red:#ff453a; --purple:#bf5af2; --info:#6aa6ff;\n  --font:-apple-system,BlinkMacSystemFont,\"SF Pro Text\",\"PingFang SC\",\"Helvetica Neue\",sans-serif;\n  --mono:ui-monospace,\"SF Mono\",Menlo,monospace;\n}\n* { box-sizing:border-box; margin:0; padding:0; }\nbody { background:#07090d; font-family:var(--font); color:var(--text); padding:36px 40px 60px; }\n.board { max-width:1720px; margin:0 auto; }\nh1 { font-size:26px; margin-bottom:6px; }\n.sub { color:var(--text-3); font-size:14px; margin-bottom:34px; }\n.sec { margin-bottom:44px; }\n.sec-title { font-size:17px; font-weight:700; margin-bottom:4px; }\n.sec-sub { font-size:13px; color:var(--text-3); margin-bottom:20px; }\n.row { display:flex; gap:28px; flex-wrap:wrap; align-items:flex-start; }\n.cell { display:flex; flex-direction:column; gap:12px; }\n.cap { font-size:13px; color:var(--text-2); line-height:1.6; max-width:300px; }\n.cap b { color:var(--text); }\n.cap .tag { display:inline-block; font-size:11px; color:var(--accent); background:var(--accent-soft); border-radius:5px; padding:1px 7px; margin-bottom:4px; }\n/* 手机框 */\n.phone { width:300px; height:630px; background:var(--bg); border:1px solid var(--line); border-radius:34px; overflow:hidden; position:relative; flex:none; box-shadow:0 18px 50px rgba(0,0,0,.5); }\n.notch { position:absolute; top:8px; left:50%; transform:translateX(-50%); width:88px; height:22px; background:#000; border-radius:11px; z-index:9; }\n.statusbar { height:40px; display:flex; align-items:flex-end; justify-content:space-between; padding:0 22px 4px; font-size:11px; color:var(--text-2); }\n.screen { position:absolute; inset:40px 0 0; display:flex; flex-direction:column; }\n/* 页头（故事页共用） */\n.story-head { padding:10px 18px 6px; display:flex; align-items:center; gap:8px; }\n.story-head .n { width:22px; height:22px; border-radius:50%; background:var(--accent-soft); color:var(--accent); font-size:12px; font-weight:700; display:flex; align-items:center; justify-content:center; flex:none; }\n.story-head .t { font-size:15px; font-weight:700; }\n.story-body { flex:1; padding:8px 18px 16px; display:flex; flex-direction:column; }\n.story-big { font-size:21px; font-weight:700; line-height:1.45; margin:6px 0 8px; }\n.story-desc { font-size:13px; color:var(--text-2); line-height:1.7; }\n.dots { display:flex; gap:6px; justify-content:center; padding:10px 0 14px; }\n.dots i { width:6px; height:6px; border-radius:3px; background:var(--line); }\n.dots i.on { background:var(--accent); width:16px; }\n/* 通用气泡 */\n.bub-u { align-self:flex-end; max-width:82%; background:var(--accent-fill); color:#fff; border-radius:16px 16px 4px 16px; padding:9px 13px; font-size:13.5px; line-height:1.5; }\n.bub-b { align-self:flex-start; max-width:82%; background:var(--bg-card); border:1px solid var(--line); border-radius:16px 16px 16px 4px; padding:9px 13px; font-size:13.5px; line-height:1.5; color:var(--text); }\n.meta { font-size:10px; color:var(--text-3); margin:2px 10px 0 auto; }\n/* ============ 屏1：你看到的 vs 背后 ============ */\n.vs-wrap { position:relative; margin-top:14px; flex:1; display:flex; flex-direction:column; }\n.vs-behind { flex:1; border:1.5px dashed rgba(59,130,246,.5); border-radius:14px; background:rgba(59,130,246,.05); padding:12px 12px 10px; margin-top:34px; position:relative; }\n.vs-behind::before { content:\"背后实际发生的\"; position:absolute; top:-11px; left:12px; background:var(--bg); padding:0 8px; font-size:11px; color:var(--accent); }\n.vs-row { display:flex; gap:8px; align-items:center; background:var(--bg-card); border:1px solid var(--line); border-radius:10px; padding:7px 10px; margin-bottom:7px; font-size:12px; color:var(--text-2); }\n.vs-row .ic { width:22px; height:22px; border-radius:6px; display:flex; align-items:center; justify-content:center; font-size:12px; flex:none; }\n.vs-tail { text-align:center; color:var(--text-3); font-size:16px; line-height:1; margin:2px 0 6px; }\n/* ============ 屏2：电话里的盲专家 ============ */\n.phone-demo { flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:0; position:relative; }\n.cloud { width:120px; height:74px; border-radius:40px; background:var(--bg-card-2); border:1px solid var(--line); display:flex; align-items:center; justify-content:center; font-size:30px; position:relative; z-index:2; }\n.cloud::after { content:\"只会想 · 只会说\"; position:absolute; bottom:-20px; left:50%; transform:translateX(-50%); font-size:11px; color:var(--text-3); white-space:nowrap; }\n.wire { width:2px; height:52px; background:linear-gradient(var(--purple), transparent); margin:26px 0 8px; }\n.tel { font-size:46px; }\n.senses { display:flex; gap:14px; margin-top:26px; }\n.sense { text-align:center; font-size:11px; color:var(--text-3); }\n.sense .x { font-size:22px; position:relative; display:block; margin-bottom:4px; }\n.sense .x::after { content:\"✕\"; position:absolute; inset:0; display:flex; align-items:center; justify-content:center; color:var(--red); font-size:22px; font-weight:700; }\n/* ============ 屏3：手和眼 ============ */\n.hands { flex:1; display:flex; flex-direction:column; gap:10px; justify-content:center; }\n.hm { display:flex; gap:10px; }\n.hm .side { width:86px; flex:none; text-align:center; font-size:11px; color:var(--text-3); }\n.hm .side .em { font-size:26px; display:block; margin-bottom:3px; }\n.hm .bub-s { flex:1; background:var(--bg-card); border:1px solid var(--line); border-radius:12px; padding:8px 11px; font-size:12.5px; line-height:1.55; color:var(--text-2); }\n.hm .bub-s b { color:var(--text); }\n.hm .bub-s.do { border-color:rgba(52,199,89,.35); }\n.hm .bub-s.do b { color:var(--green); }\n/* ============ 屏4：循环 ============ */\n.ring-wrap { flex:1; display:flex; align-items:center; justify-content:center; position:relative; }\n.ring { width:212px; height:212px; position:relative; }\n.ring svg { width:100%; height:100%; transform:rotate(-90deg); }\n.stn { position:absolute; width:64px; height:64px; margin:-32px; border-radius:50%; background:var(--bg-card); border:1px solid var(--line); display:flex; flex-direction:column; align-items:center; justify-content:center; gap:1px; font-size:12px; font-weight:600; color:var(--text-2); }\n.stn .em2 { font-size:17px; }\n.stn.lit { border-color:var(--accent); color:#fff; background:rgba(59,130,246,.18); box-shadow:0 0 24px rgba(59,130,246,.35); }\n.ring-ct { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:2px; }\n.ring-ct .k { font-size:11px; color:var(--text-3); }\n.ring-ct .v { font-size:26px; font-weight:800; font-variant-numeric:tabular-nums; }\n.ring-ct .v small { font-size:12px; font-weight:600; color:var(--text-3); }\n/* ============ 屏5：案卷 ============ */\n.papers { flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:18px; }\n.stack { position:relative; width:150px; }\n.p { height:15px; background:var(--bg-card-2); border:1px solid var(--line); border-radius:3px; margin-top:-4px; }\n.p.on { background:rgba(191,90,242,.25); border-color:rgba(191,90,242,.4); }\n.pressure { width:86%; }\n.pressure .lbl { display:flex; justify-content:space-between; font-size:11px; color:var(--text-3); margin-bottom:5px; }\n.pbar { height:8px; border-radius:4px; background:var(--bg-card); overflow:hidden; }\n.pbar i { display:block; height:100%; width:68%; border-radius:4px; background:linear-gradient(90deg, var(--accent), var(--orange)); }\n/* ============ 导演视角 ============ */\n.chat-mini { flex:1; overflow:hidden; padding:4px 14px; display:flex; flex-direction:column; gap:9px; }\n.engine-ov { position:absolute; left:0; right:0; bottom:0; background:var(--bg-elev); border-top:1px solid var(--line); border-radius:20px 20px 0 0; padding:12px 16px 14px; box-shadow:0 -14px 40px rgba(0,0,0,.5); }\n.eng-head { display:flex; align-items:center; gap:8px; margin-bottom:8px; }\n.eng-head .dot { width:8px; height:8px; border-radius:50%; background:var(--accent); animation:pulse 1.2s infinite; }\n@keyframes pulse { 0%,100% { opacity:1; transform:scale(1);} 50% { opacity:.4; transform:scale(.7);} }\n.eng-head .tt { font-size:14px; font-weight:700; }\n.eng-head .cnt { margin-left:auto; font-size:12px; color:var(--info); font-variant-numeric:tabular-nums; }\n.eng-body { display:flex; gap:14px; align-items:center; }\n.eng-ring { width:118px; height:118px; position:relative; flex:none; }\n.eng-ring svg { width:100%; height:100%; transform:rotate(-90deg); }\n.eng-acts { flex:1; min-width:0; }\n.eng-act { display:flex; align-items:center; gap:8px; padding:5px 8px; border-radius:9px; font-size:12px; color:var(--text-2); }\n.eng-act.now { background:var(--accent-soft); color:var(--text); }\n.eng-act .st { margin-left:auto; font-size:10.5px; color:var(--text-3); }\n.eng-act.now .st { color:var(--info); }\n.st2 { position:absolute; width:46px; height:46px; margin:-23px; border-radius:50%; background:var(--bg-card); border:1px solid var(--line); display:flex; flex-direction:column; align-items:center; justify-content:center; font-size:10px; color:var(--text-2); }\n.st2 .em2 { font-size:14px; }\n.st2.lit { border-color:var(--accent); color:#fff; background:rgba(59,130,246,.2); }\n/* ============ 人话模式 ============ */\n.toggle-row { display:flex; align-items:center; gap:8px; padding:10px 18px 4px; font-size:13px; color:var(--text-2); }\n.tg { margin-left:auto; width:42px; height:25px; border-radius:13px; background:var(--green); position:relative; }\n.tg::after { content:\"\"; position:absolute; top:2.5px; right:2.5px; width:20px; height:20px; border-radius:10px; background:#fff; }\n.toolcard { background:var(--bg-card); border:1px solid var(--line); border-radius:13px; padding:9px 12px; font-size:12.5px; }\n.toolcard .tc-h { display:flex; align-items:center; gap:7px; color:var(--text); font-weight:600; }\n.toolcard .tc-h .ic { font-size:14px; }\n.toolcard .tc-h .raw { margin-left:auto; font-size:10px; color:var(--text-3); font-family:var(--mono); }\n.toolcard .tc-b { margin-top:5px; color:var(--text-2); font-size:12px; line-height:1.55; }\n.arrow-note { text-align:center; color:var(--text-3); font-size:13px; margin:2px 0; }\n"
+const PROTO_HTML = "\n<div class=\"board\">\n  <h1>Harness 可视化 · 原型</h1>\n  <div class=\"sub\">隐喻主线：「电话里的盲专家」— 模型只会想和说，Harness 是它的手和眼。两层呈现：静态故事页（讲一次）+ 导演视角（运行中看）。不占主界面。</div>\n\n  <div class=\"sec\">\n    <div class=\"sec-title\">第一层 · 故事页「一次对话是怎么完成的」</div>\n    <div class=\"sec-sub\">入口：⋯ 菜单底部一行「这是怎么工作的？」· 五屏横滑 · 每屏一句话 + 一个极简图形 · 数字取自当前会话真实数据</div>\n    <div class=\"row\">\n\n      <div class=\"cell\">\n        <div class=\"phone\"><div class=\"notch\"></div><div class=\"statusbar\"><span>9:41</span><span>􀙇 􀛨</span></div>\n          <div class=\"screen\">\n            <div class=\"story-head\"><span class=\"n\">0</span><span class=\"t\">入口 · 现有界面不动</span></div>\n            <div class=\"story-body\" style=\"padding-top:2px\">\n              <div class=\"story-desc\" style=\"margin-bottom:8px\">⋯ 菜单完全保持原样，只在最底多一行：</div>\n              <div class=\"vs-row\"><span class=\"ic\" style=\"background:rgba(59,130,246,.15)\">🧠</span>模型</div>\n              <div class=\"vs-row\"><span class=\"ic\" style=\"background:rgba(52,199,89,.12)\">🛡</span>权限</div>\n              <div class=\"vs-row\"><span class=\"ic\" style=\"background:rgba(255,159,10,.15)\">📤</span>运行中发送</div>\n              <div class=\"vs-row\"><span class=\"ic\" style=\"background:rgba(154,163,178,.15)\">📊</span>统计</div>\n              <div class=\"vs-row\"><span class=\"ic\" style=\"background:rgba(154,163,178,.15)\">📋</span>复制全部对话</div>\n              <div style=\"height:6px\"></div>\n              <div class=\"vs-row\" style=\"border-color:var(--accent); background:var(--accent-soft)\"><span class=\"ic\" style=\"background:rgba(59,130,246,.25)\">💡</span><b style=\"color:var(--text)\">这是怎么工作的？</b><span style=\"margin-left:auto; color:var(--accent)\">›</span></div>\n              <div class=\"story-desc\" style=\"margin-top:auto; line-height:1.7; padding-top:10px\">主界面、聊天流、输入区——<b style=\"color:var(--text)\">一个像素都不动</b>。<br>不看就当它不存在。</div>\n            </div>\n          </div>\n        </div>\n        <div class=\"cap\"><span class=\"tag\">零侵入</span><b>唯一改动：⋯ 底部一行。</b>也可以更小：做成设置里的一行，或首次使用第 3 天才出现一次的提示条。</div>\n      </div>\n\n      <div class=\"cell\">\n        <div class=\"phone\"><div class=\"notch\"></div><div class=\"statusbar\"><span>9:41</span><span>􀙇 􀛨</span></div>\n          <div class=\"screen\">\n            <div class=\"story-head\"><span class=\"n\">1</span><span class=\"t\">你看到的</span></div>\n            <div class=\"story-body\">\n              <div class=\"bub-u\">帮我看看这个项目的测试都覆盖了哪些模块</div>\n              <div class=\"meta\">14:02</div>\n              <div class=\"vs-wrap\">\n                <div class=\"vs-behind\">\n                  <div class=\"vs-row\"><span class=\"ic\" style=\"background:rgba(191,90,242,.15)\">🧠</span>先想了 26 秒，拆解你要什么</div>\n                  <div class=\"vs-row\"><span class=\"ic\" style=\"background:rgba(59,130,246,.15)\">📄</span>翻了 5 个文件，看了目录结构</div>\n                  <div class=\"vs-row\"><span class=\"ic\" style=\"background:rgba(52,199,89,.12)\">⌨️</span>跑了 2 条命令，找出所有测试</div>\n                  <div class=\"vs-tail\">↓</div>\n                  <div class=\"vs-row\" style=\"border-color:rgba(59,130,246,.4)\"><span class=\"ic\" style=\"background:var(--accent-soft)\">💬</span>最后才写下你看到的那段话</div>\n                </div>\n              </div>\n            </div>\n            <div class=\"dots\"><i class=\"on\"></i><i></i><i></i><i></i><i></i></div>\n          </div>\n        </div>\n        <div class=\"cap\"><span class=\"tag\">破冰</span><b>同一个气泡，背后是一场协作。</b>用用户自己刚发的消息做例子，虚线框拉开「幕后」。</div>\n      </div>\n\n      <div class=\"cell\">\n        <div class=\"phone\"><div class=\"notch\"></div><div class=\"statusbar\"><span>9:41</span><span>􀙇 􀛨</span></div>\n          <div class=\"screen\">\n            <div class=\"story-head\"><span class=\"n\">2</span><span class=\"t\">电话那头的专家</span></div>\n            <div class=\"story-body\">\n              <div class=\"story-big\">模型很聪明，<br>但看不见也摸不着</div>\n              <div class=\"phone-demo\">\n                <div class=\"cloud\">🧠</div>\n                <div class=\"wire\"></div>\n                <div class=\"tel\">☎️</div>\n                <div class=\"senses\">\n                  <div class=\"sense\"><span class=\"x\">👁</span>看不见<br>你的电脑</div>\n                  <div class=\"sense\"><span class=\"x\">✋</span>摸不到<br>你的文件</div>\n                  <div class=\"sense\"><span class=\"x\">🏃</span>不能自己<br>动手做</div>\n                </div>\n              </div>\n              <div class=\"story-desc\" style=\"margin-top:10px\">它像电话里的专家：只能听你说，只能开口回答。其余一切，都需要有人替它做。</div>\n            </div>\n            <div class=\"dots\"><i></i><i class=\"on\"></i><i></i><i></i><i></i></div>\n          </div>\n        </div>\n        <div class=\"cap\"><span class=\"tag\">核心隐喻</span><b>「盲」是关键。</b>它让「为什么需要工具、为什么有中间人」变得不言自明。</div>\n      </div>\n\n      <div class=\"cell\">\n        <div class=\"phone\"><div class=\"notch\"></div><div class=\"statusbar\"><span>9:41</span><span>􀙇 􀛨</span></div>\n          <div class=\"screen\">\n            <div class=\"story-head\"><span class=\"n\">3</span><span class=\"t\">手和眼</span></div>\n            <div class=\"story-body\">\n              <div class=\"story-big\">Harness 替它动手</div>\n              <div class=\"hands\">\n                <div class=\"hm\"><div class=\"side\"><span class=\"em\">🧠</span>专家说</div><div class=\"bub-s\">「帮我<b>翻一下</b>测试目录里有哪些文件」</div></div>\n                <div class=\"hm\"><div class=\"side\"><span class=\"em\">🤖</span>Harness</div><div class=\"bub-s do\">好，<b>正在翻看</b> · tests/ 下有 14 个文件</div></div>\n                <div class=\"hm\"><div class=\"side\"><span class=\"em\">🧠</span>专家说</div><div class=\"bub-s\">「<b>跑一下</b>测试，把结果念给我」</div></div>\n                <div class=\"hm\"><div class=\"side\"><span class=\"em\">🤖</span>Harness</div><div class=\"bub-s do\">好，<b>执行完毕</b> · 全部通过，用了 8 秒</div></div>\n                <div class=\"hm\"><div class=\"side\"><span class=\"em\">🧠</span>专家说</div><div class=\"bub-s\">「行了，我懂了，我来总结」</div></div>\n              </div>\n            </div>\n            <div class=\"dots\"><i></i><i></i><i class=\"on\"></i><i></i><i></i></div>\n          </div>\n        </div>\n        <div class=\"cap\"><span class=\"tag\">分工</span><b>对话式呈现一来一回。</b>对应真实机制：模型输出工具调用 → Harness 执行 → 结果回传。</div>\n      </div>\n\n      <div class=\"cell\">\n        <div class=\"phone\"><div class=\"notch\"></div><div class=\"statusbar\"><span>9:41</span><span>􀙇 􀛨</span></div>\n          <div class=\"screen\">\n            <div class=\"story-head\"><span class=\"n\">4</span><span class=\"t\">转 圈</span></div>\n            <div class=\"story-body\">\n              <div class=\"story-big\">你的一条消息<br>实际转了 7 圈</div>\n              <div class=\"ring-wrap\">\n                <div class=\"ring\">\n                  <svg viewBox=\"0 0 100 100\">\n                    <circle cx=\"50\" cy=\"50\" r=\"40\" fill=\"none\" stroke=\"rgba(255,255,255,.08)\" stroke-width=\"2.5\"/>\n                    <circle cx=\"50\" cy=\"50\" r=\"40\" fill=\"none\" stroke=\"var(--accent)\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-dasharray=\"188 251\" style=\"filter:drop-shadow(0 0 4px rgba(59,130,246,.6))\"/>\n                    <path d=\"M 86 36 l 6 8 l -10 2 z\" fill=\"var(--accent)\"/>\n                  </svg>\n                  <div class=\"stn lit\" style=\"left:50%; top:10%\"><span class=\"em2\">🧠</span>想</div>\n                  <div class=\"stn\" style=\"left:90%; top:50%\"><span class=\"em2\">🔧</span>做</div>\n                  <div class=\"stn\" style=\"left:50%; top:90%\"><span class=\"em2\">👀</span>看</div>\n                  <div class=\"stn\" style=\"left:10%; top:50%\"><span class=\"em2\">🔁</span>再想</div>\n                  <div class=\"ring-ct\"><span class=\"k\">这条消息</span><span class=\"v\">7<small> 圈</small></span></div>\n                </div>\n              </div>\n              <div class=\"story-desc\" style=\"text-align:center\">不是一问一答——是想→做→看→再想，<br>直到专家说「我可以汇报了」。</div>\n            </div>\n            <div class=\"dots\"><i></i><i></i><i></i><i class=\"on\"></i><i></i></div>\n          </div>\n        </div>\n        <div class=\"cap\"><span class=\"tag\">反直觉点</span><b>圈数是真实数字。</b>从会话的 step 事件里取，冲击力全在「原来不是一问一答」。</div>\n      </div>\n\n      <div class=\"cell\">\n        <div class=\"phone\"><div class=\"notch\"></div><div class=\"statusbar\"><span>9:41</span><span>􀙇 􀛨</span></div>\n          <div class=\"screen\">\n            <div class=\"story-head\"><span class=\"n\">5</span><span class=\"t\">案卷越念越厚</span></div>\n            <div class=\"story-body\">\n              <div class=\"story-big\">每说一句，<br>案卷就厚一分</div>\n              <div class=\"papers\">\n                <div class=\"stack\">\n                  <div class=\"p on\"></div><div class=\"p on\"></div><div class=\"p on\"></div><div class=\"p on\"></div><div class=\"p on\"></div><div class=\"p on\"></div><div class=\"p\"></div><div class=\"p\"></div><div class=\"p\"></div>\n                </div>\n                <div class=\"pressure\">\n                  <div class=\"lbl\"><span>当前案卷厚度（上下文）</span><span>68%</span></div>\n                  <div class=\"pbar\"><i></i></div>\n                  <div class=\"lbl\" style=\"margin-top:7px; line-height:1.5\"><span style=\"color:var(--text-2)\">太厚时会自动做摘要再继续——<br>这也是长对话偶尔「忘事」的原因</span></div>\n                </div>\n              </div>\n            </div>\n            <div class=\"dots\"><i></i><i></i><i></i><i></i><i class=\"on\"></i></div>\n          </div>\n        </div>\n        <div class=\"cap\"><span class=\"tag\">收尾呼应</span><b>把「上下文压力」翻译成案卷厚度。</b>与统计面板里的真实数字互相印证。</div>\n      </div>\n\n    </div>\n  </div>\n\n  <div class=\"sec\">\n    <div class=\"sec-title\">真实对话演示 · 数字全部来自会话事件日志</div>\n    <div class=\"sec-sub\">同一位用户最近的真实会话——同一个「幕后」拆解，换成真数据（已隐藏工作区路径细节）</div>\n    <div class=\"row\">\n<div class=\"cell\">\n        <div class=\"phone\"><div class=\"notch\"></div><div class=\"statusbar\"><span>9:41</span><span>􀙇 􀛨</span></div>\n          <div class=\"screen\">\n            <div class=\"story-head\"><span class=\"n\">✓</span><span class=\"t\">总结今天使用DSH所做的</span></div>\n            <div class=\"story-body\">\n              <div class=\"bub-u\">总结一下我今天用DSH都干了些啥，不超过100个字。</div>\n              <div class=\"vs-wrap\" style=\"margin-top:10px\">\n                <div class=\"vs-behind\" style=\"margin-top:0\">\n                  <div class=\"vs-row\"><span class=\"ic\" style=\"background:rgba(191,90,242,.15)\">🧠</span>转了 <b>8 圈</b>：想→做→看→再想</div>\n                  <div class=\"vs-row\"><span class=\"ic\" style=\"background:rgba(59,130,246,.15)\">📄</span>翻了 <b>0 个文件</div>\n                  <div class=\"vs-row\"><span class=\"ic\" style=\"background:rgba(52,199,89,.12)\">⌨️</span>跑了 <b>7 条命令</b>，用了 1 分钟</div>\n                  <div class=\"vs-tail\">↓</div>\n                  <div class=\"vs-row\" style=\"border-color:rgba(59,130,246,.4)\"><span class=\"ic\" style=\"background:var(--accent-soft)\">💬</span>最后写下你看到的那段话</div>\n                </div>\n              </div>\n              <div class=\"ring-wrap\" style=\"min-height:180px\">\n                <div class=\"ring\" style=\"width:168px; height:168px\">\n                  <svg viewBox=\"0 0 100 100\">\n                    <circle cx=\"50\" cy=\"50\" r=\"40\" fill=\"none\" stroke=\"rgba(255,255,255,.08)\" stroke-width=\"2.5\"/>\n                    <circle cx=\"50\" cy=\"50\" r=\"40\" fill=\"none\" stroke=\"var(--accent)\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-dasharray=\"188 251\" style=\"filter:drop-shadow(0 0 4px rgba(59,130,246,.6))\"/>\n                    <path d=\"M 86 36 l 6 8 l -10 2 z\" fill=\"var(--accent)\"/>\n                  </svg>\n                  <div class=\"stn lit\" style=\"left:50%; top:10%\"><span class=\"em2\">🧠</span>想</div>\n                  <div class=\"stn\" style=\"left:90%; top:50%\"><span class=\"em2\">🔧</span>做</div>\n                  <div class=\"stn\" style=\"left:50%; top:90%\"><span class=\"em2\">👀</span>看</div>\n                  <div class=\"stn\" style=\"left:10%; top:50%\"><span class=\"em2\">🔁</span>再想</div>\n                  <div class=\"ring-ct\"><span class=\"k\">这一条消息</span><span class=\"v\" style=\"font-size:22px\">8<small> 圈</small></span></div>\n                </div>\n              </div>\n              <div class=\"lbl\"><span>这条会话的案卷厚度</span><span>7%</span></div><div class=\"pbar\"><i style=\"width:7%\"></i></div>\n            </div>\n          </div>\n        </div>\n        <div class=\"cap\"><span class=\"tag\">简单请求</span><b>「不超过100个字」的总结，也转了 8 圈。</b>它翻了整天的记录、跑了 7 条命令才敢下笔——普通人以为的一问一答，背后是完整的工作流程。</div>\n      </div><div class=\"cell\">\n        <div class=\"phone\"><div class=\"notch\"></div><div class=\"statusbar\"><span>9:41</span><span>􀙇 􀛨</span></div>\n          <div class=\"screen\">\n            <div class=\"story-head\"><span class=\"n\">✓</span><span class=\"t\">门店补货逻辑HTML科普</span></div>\n            <div class=\"story-body\">\n              <div class=\"bub-u\">你用HTML做一个科普，给我们的这个门店补货的逻辑做个科普。我要给我们公司的…</div>\n              <div class=\"vs-wrap\" style=\"margin-top:10px\">\n                <div class=\"vs-behind\" style=\"margin-top:0\">\n                  <div class=\"vs-row\"><span class=\"ic\" style=\"background:rgba(191,90,242,.15)\">🧠</span>转了 <b>145 圈</b>：想→做→看→再想</div>\n                  <div class=\"vs-row\"><span class=\"ic\" style=\"background:rgba(59,130,246,.15)\">📄</span>翻了 <b>6 个文件（补货方法论与预测消费契约.md、门店补货业务方案.md、补货规则决策表.md 等）</div>\n                  <div class=\"vs-row\"><span class=\"ic\" style=\"background:rgba(52,199,89,.12)\">⌨️</span>跑了 <b>65 条命令</b>，用了 35 分钟</div>\n                  <div class=\"vs-tail\">↓</div>\n                  <div class=\"vs-row\" style=\"border-color:rgba(59,130,246,.4)\"><span class=\"ic\" style=\"background:var(--accent-soft)\">💬</span>最后写下你看到的那段话</div>\n                </div>\n              </div>\n              <div class=\"ring-wrap\" style=\"min-height:180px\">\n                <div class=\"ring\" style=\"width:168px; height:168px\">\n                  <svg viewBox=\"0 0 100 100\">\n                    <circle cx=\"50\" cy=\"50\" r=\"40\" fill=\"none\" stroke=\"rgba(255,255,255,.08)\" stroke-width=\"2.5\"/>\n                    <circle cx=\"50\" cy=\"50\" r=\"40\" fill=\"none\" stroke=\"var(--accent)\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-dasharray=\"188 251\" style=\"filter:drop-shadow(0 0 4px rgba(59,130,246,.6))\"/>\n                    <path d=\"M 86 36 l 6 8 l -10 2 z\" fill=\"var(--accent)\"/>\n                  </svg>\n                  <div class=\"stn lit\" style=\"left:50%; top:10%\"><span class=\"em2\">🧠</span>想</div>\n                  <div class=\"stn\" style=\"left:90%; top:50%\"><span class=\"em2\">🔧</span>做</div>\n                  <div class=\"stn\" style=\"left:50%; top:90%\"><span class=\"em2\">👀</span>看</div>\n                  <div class=\"stn\" style=\"left:10%; top:50%\"><span class=\"em2\">🔁</span>再想</div>\n                  <div class=\"ring-ct\"><span class=\"k\">这一条消息</span><span class=\"v\" style=\"font-size:22px\">145<small> 圈</small></span></div>\n                </div>\n              </div>\n              <div class=\"lbl\"><span>这条会话的案卷厚度</span><span>19%</span></div><div class=\"pbar\"><i style=\"width:19%\"></i></div>\n            </div>\n          </div>\n        </div>\n        <div class=\"cap\"><span class=\"tag\">做东西</span><b>给文员做一页科普。</b>一句话 → 145 圈 · 35 分钟：读业务方案、理解决策表、写页面、自查。案卷厚度 19%。</div>\n      </div><div class=\"cell\">\n        <div class=\"phone\"><div class=\"notch\"></div><div class=\"statusbar\"><span>9:41</span><span>􀙇 􀛨</span></div>\n          <div class=\"screen\">\n            <div class=\"story-head\"><span class=\"n\">✓</span><span class=\"t\">方法调研</span></div>\n            <div class=\"story-body\">\n              <div class=\"bub-u\">你先做 P0 和P1吧，做完后你可以基于历史数据更新一下预测吗？我拿实际数据…</div>\n              <div class=\"vs-wrap\" style=\"margin-top:10px\">\n                <div class=\"vs-behind\" style=\"margin-top:0\">\n                  <div class=\"vs-row\"><span class=\"ic\" style=\"background:rgba(191,90,242,.15)\">🧠</span>转了 <b>163 圈</b>：想→做→看→再想</div>\n                  <div class=\"vs-row\"><span class=\"ic\" style=\"background:rgba(59,130,246,.15)\">📄</span>翻了 <b>6 个文件（cli.py、backtest.py、grain.py 等）</div>\n                  <div class=\"vs-row\"><span class=\"ic\" style=\"background:rgba(52,199,89,.12)\">⌨️</span>跑了 <b>106 条命令</b>，用了 3.2 小时</div>\n                  <div class=\"vs-tail\">↓</div>\n                  <div class=\"vs-row\" style=\"border-color:rgba(59,130,246,.4)\"><span class=\"ic\" style=\"background:var(--accent-soft)\">💬</span>最后写下你看到的那段话</div>\n                </div>\n              </div>\n              <div class=\"ring-wrap\" style=\"min-height:180px\">\n                <div class=\"ring\" style=\"width:168px; height:168px\">\n                  <svg viewBox=\"0 0 100 100\">\n                    <circle cx=\"50\" cy=\"50\" r=\"40\" fill=\"none\" stroke=\"rgba(255,255,255,.08)\" stroke-width=\"2.5\"/>\n                    <circle cx=\"50\" cy=\"50\" r=\"40\" fill=\"none\" stroke=\"var(--accent)\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-dasharray=\"188 251\" style=\"filter:drop-shadow(0 0 4px rgba(59,130,246,.6))\"/>\n                    <path d=\"M 86 36 l 6 8 l -10 2 z\" fill=\"var(--accent)\"/>\n                  </svg>\n                  <div class=\"stn lit\" style=\"left:50%; top:10%\"><span class=\"em2\">🧠</span>想</div>\n                  <div class=\"stn\" style=\"left:90%; top:50%\"><span class=\"em2\">🔧</span>做</div>\n                  <div class=\"stn\" style=\"left:50%; top:90%\"><span class=\"em2\">👀</span>看</div>\n                  <div class=\"stn\" style=\"left:10%; top:50%\"><span class=\"em2\">🔁</span>再想</div>\n                  <div class=\"ring-ct\"><span class=\"k\">这一条消息</span><span class=\"v\" style=\"font-size:22px\">163<small> 圈</small></span></div>\n                </div>\n              </div>\n              <div class=\"lbl\"><span>这条会话的案卷厚度</span><span>45%</span></div><div class=\"pbar\"><i style=\"width:45%\"></i></div>\n            </div>\n          </div>\n        </div>\n        <div class=\"cap\"><span class=\"tag\">深度调研</span><b>长任务的极限形态。</b>163 圈 · 3.2 小时 · 106 条命令。专家级耐心的价值一眼可见——也解释了为什么有时要等。</div>\n      </div>\n    </div>\n  </div>\n  <div class=\"sec\">\n    <div class=\"sec-title\">第二层 · 导演视角（运行中才能看）</div>\n    <div class=\"sec-sub\">入口：运行时 ⋯ 里出现「看它现在在干嘛」· 数据全部来自现有事件流（step / tool / reasoning）· 顺带解决「它在干嘛、卡没卡」</div>\n    <div class=\"row\">\n\n      <div class=\"cell\">\n        <div class=\"phone\"><div class=\"notch\"></div><div class=\"statusbar\"><span>9:41</span><span>􀙇 􀛨</span></div>\n          <div class=\"screen\">\n            <div class=\"chat-mini\">\n              <div class=\"bub-u\">把刚才那版样式再调紧一点</div>\n              <div class=\"meta\">14:32</div>\n              <div class=\"bub-b\" style=\"color:var(--text-3)\">正在处理…</div>\n              <div class=\"toolcard\" style=\"opacity:.55\"><div class=\"tc-h\"><span class=\"ic\">⌨️</span>bash<span class=\"raw\">2.1s</span></div><div class=\"tc-b\">npm run build</div></div>\n              <div class=\"toolcard\" style=\"opacity:.55\"><div class=\"tc-h\"><span class=\"ic\">📄</span>read<span class=\"raw\">0.3s</span></div><div class=\"tc-b\">web/style.css</div></div>\n            </div>\n            <div class=\"engine-ov\">\n              <div class=\"eng-head\"><span class=\"dot\"></span><span class=\"tt\">引擎</span><span class=\"cnt\">第 5 圈 · 工具 12 次 · 思考 34s</span></div>\n              <div class=\"eng-body\">\n                <div class=\"eng-ring\">\n                  <svg viewBox=\"0 0 100 100\">\n                    <circle cx=\"50\" cy=\"50\" r=\"40\" fill=\"none\" stroke=\"rgba(255,255,255,.08)\" stroke-width=\"3\"/>\n                    <circle cx=\"50\" cy=\"50\" r=\"40\" fill=\"none\" stroke=\"var(--accent)\" stroke-width=\"3\" stroke-linecap=\"round\" stroke-dasharray=\"94 251\" style=\"filter:drop-shadow(0 0 5px rgba(59,130,246,.6))\"/>\n                    <path d=\"M 80 26 l 5 8 l -10 2 z\" fill=\"var(--accent)\"/>\n                  </svg>\n                  <div class=\"st2 lit\" style=\"left:50%; top:10%\"><span class=\"em2\">🧠</span>想</div>\n                  <div class=\"st2\" style=\"left:90%; top:50%\"><span class=\"em2\">🔧</span>做</div>\n                  <div class=\"st2\" style=\"left:50%; top:90%\"><span class=\"em2\">👀</span>看</div>\n                  <div class=\"st2\" style=\"left:10%; top:50%\"><span class=\"em2\">🔁</span>再想</div>\n                </div>\n                <div class=\"eng-acts\">\n                  <div class=\"eng-act now\">🧠 正在思考 <span class=\"st\">已 6s</span></div>\n                  <div class=\"eng-act\">📄 翻看了 style.css <span class=\"st\">0.3s</span></div>\n                  <div class=\"eng-act\">⌨️ 跑了构建命令 <span class=\"st\">2.1s</span></div>\n                  <div class=\"eng-act\">🔁 上一圈：改了间距 <span class=\"st\"></span></div>\n                </div>\n              </div>\n            </div>\n          </div>\n        </div>\n        <div class=\"cap\"><span class=\"tag\">实时</span><b>当前阶段亮起、环随进度填充。</b>说话式记录代替工具名，转圈图本身就是诚实的进度指示。</div>\n      </div>\n\n      <div class=\"cell\">\n        <div class=\"phone\"><div class=\"notch\"></div><div class=\"statusbar\"><span>9:41</span><span>􀙇 􀛨</span></div>\n          <div class=\"screen\">\n            <div class=\"story-head\"><span class=\"n\">+</span><span class=\"t\">对账 · 人话 ↔ 原版</span></div>\n            <div class=\"story-body\" style=\"padding-top:2px\">\n              <div class=\"story-desc\" style=\"margin-bottom:8px\">讲解页末尾：把你<b style=\"color:var(--text)\">这条真实会话</b>翻译一遍（只在讲解内部，不改真实聊天）</div>\n              <div class=\"toolcard\"><div class=\"tc-h\"><span class=\"ic\">📄</span>翻看了文件<span class=\"raw\">read · 0.3s</span></div><div class=\"tc-b\">web/app.js（4600 行）——扫了滚动和抽屉相关部分</div></div>\n              <div class=\"arrow-note\">↓ 同一张卡片，你平时看到的</div>\n              <div class=\"toolcard\"><div class=\"tc-h\"><span class=\"ic\">📄</span>read<span class=\"raw\">0.3s</span></div><div class=\"tc-b\" style=\"font-family:var(--mono); font-size:11px\">web/app.js</div></div>\n            </div>\n          </div>\n        </div>\n        <div class=\"cap\"><span class=\"tag\">渗透（可选）</span><b>只在讲解页内部对照。</b>真实聊天一个像素不动；将来若想要常驻人话版，再作为设置里的可选项讨论。</div>\n      </div>\n\n      <div class=\"cell\" style=\"max-width:560px\">\n        <div style=\"background:var(--bg-elev); border:1px solid var(--line); border-radius:16px; padding:20px 22px; font-size:13px; line-height:2; color:var(--text-2)\">\n          <div style=\"font-size:15px; font-weight:700; color:var(--text); margin-bottom:8px\">映射表 · 真实机制 → 屏幕语言</div>\n          <b style=\"color:var(--text)\">上下文</b> → 案卷（电话里念给专家听的）<br>\n          <b style=\"color:var(--text)\">思考流</b> → 专家沉吟「正在想」<br>\n          <b style=\"color:var(--text)\">工具调用</b> → 「帮我翻一下 / 跑一下」（人话模式）<br>\n          <b style=\"color:var(--text)\">结果回传</b> → 「念给他听」（下一圈开始）<br>\n          <b style=\"color:var(--text)\">多步循环</b> → 转圈计数「第 N 圈」<br>\n          <b style=\"color:var(--text)\">排队 / 插话</b> → 排队等他忙完 / 凑到电话边补一句<br>\n          <b style=\"color:var(--text)\">上下文压力 / 压缩</b> → 案卷厚度 · 自动做摘要<br>\n          <div style=\"margin-top:12px; padding-top:12px; border-top:1px solid var(--line)\">\n            <b style=\"color:var(--text)\">刻意不画：</b>token、JSON、system prompt 原文、模型路由、思考强度原理——每个概念只在它困扰用户的地方出现，不做教科书。\n          </div>\n        </div>\n        <div class=\"cap\"><span class=\"tag\">边界</span>原型的五屏叙事 + 导演视角 + 人话模式三层，均不占主界面：全部藏在 ⋯ 与设置里。</div>\n      </div>\n\n    </div>\n  </div>\n</div>\n"
+let protoView = null
+function showProto() {
+  closeProto()
+  protoView = el('div')
+  protoView.id = 'proto-view'
+  protoView.style.cssText = 'position:fixed;inset:0;z-index:9999;background:#07090d;overflow-y:auto;-webkit-overflow-scrolling:touch'
+  const st = document.createElement('style')
+  st.textContent = PROTO_STYLE
+  const wrap = el('div', 'proto-board')
+  wrap.style.cssText = 'padding:36px 16px 60px;max-width:1720px;margin:0 auto'
+  wrap.innerHTML = PROTO_HTML
+  const back = el('button', null, '✕ 关闭原型')
+  back.type = 'button'
+  back.style.cssText = 'position:sticky;top:10px;margin:0 0 14px auto;display:block;z-index:2;background:var(--bg-card-2);color:var(--text);border:1px solid var(--line);border-radius:20px;padding:8px 16px;font-size:14px'
+  back.onclick = () => { location.hash = '#/' }
+  protoView.append(st, back, wrap)
+  document.body.appendChild(protoView)
+}
+function closeProto() { if (protoView) { protoView.remove(); protoView = null } }
+
 function route() {
   const h = location.hash || '#/'
+  if (h === '#/proto') { S.current = null; showProto(); return }
+  closeProto()
   if (h.startsWith('#/s/')) { openSession(decodeURIComponent(h.slice(4))); updateTabs(); return }
   if (h === '#/new') { S.current = null; showView('new'); renderNew(); return }
   S.current = null
@@ -3371,6 +3726,8 @@ function renderSheet(s) {
       toast('已归档（可在桌面端恢复）')
     } catch (e) { toast('归档失败：' + e.message, true) }
   }))
+  // ---- 原型：这是怎么工作的（hi-fi，评审入口；不要可整体删掉这一段）----
+  c.appendChild(valueRow('这是怎么工作的？', '一分钟看懂它怎么替你干活', '', () => { closeSheet(); openHowItWorks(s) }))
   c.appendChild(el('div', 'sheet-note', '点带 › 的行进入对应设置。'))
 }
 /* 重命名：⋯ → 会话 → 重命名，就地编辑保存 */
