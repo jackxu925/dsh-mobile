@@ -463,6 +463,17 @@ html.light .tool-trunc { color:#9a4a06; }
   .start-btn { display:block; }
 }
 
+/* 模型面板：当前模型置顶卡（强度就在旁边） */
+.model-cur { margin: 6px 10px 4px; padding: 12px 14px; background: var(--bg-card); border: 1px solid var(--accent); border-radius: 13px; }
+.model-cur .mc-tag { font-size: 10.5px; font-weight: 700; color: var(--accent); margin-bottom: 3px; }
+.model-cur .mc-name { font-size: 15.5px; font-weight: 700; }
+.model-cur .mc-desc { font-size: 12px; color: var(--text-3); margin-top: 3px; line-height: 1.5; }
+.model-cur .mc-efs { padding-top: 9px; }
+.model-cur .mc-noefs { font-size: 12px; color: var(--text-3); margin-top: 7px; }
+.chip .ef-hint { margin-left: 4px; color: var(--text-3); font-size: 10px; }
+/* 时间线里的模型切换标记行 */
+.msw-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--purple); flex: none; }
+.msw-tx { font-variant-numeric: tabular-nums; }
 /* 底部动作面板（会话 ⋯ 菜单） */
 .sheet-overlay {
   position:absolute; inset:0; z-index:70;

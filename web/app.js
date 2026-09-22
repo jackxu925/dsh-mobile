@@ -639,6 +639,15 @@ function foldEvent(s, event, view) {
       break
     }
     case 'session/title': if (d.title) s.title = d.title; break
+    case 'model/selection': {
+      // 模型切换标记：渲染成极简系统行（→ 名字 · 强度），回看长会话能知道每段是哪个模型
+      // 同一手势的连续选择（选模型、紧跟选强度）合并成一条，不刷屏
+      const prev = s.items[s.items.length - 1]
+      if (prev && prev.kind === 'sys' && prev.modelSel && event.time - (prev.time || 0) < 3000) prev.modelSel = { ...d }
+      else s.items.push({ kind: 'sys', modelSel: { ...d }, time: event.time, seq: event.seq })
+      if (S.current === s.id) scheduleRender(s)
+      break
+    }
   }
 }
 
@@ -1206,6 +1215,13 @@ function itemNodeInner(s, item) {
     case 'sys': {
       const d = el('div', null)
       d.style.cssText = 'align-self:center;font-size:12.5px;color:var(--text-3);padding:4px 0;display:flex;align-items:center;gap:6px'
+      if (item.modelSel) {
+        // 模型切换标记行：名字由目录解析（目录没到就用原始 id，目录到了再刷）
+        const dot = el('span', 'msw-dot')
+        d.appendChild(dot)
+        d.appendChild(el('span', 'msw-tx', '→ ' + modelNameOf(s, item.modelSel)))
+        return d
+      }
       d.appendChild(el('span', null, item.text))
       const sq = el('button', 'meta-ico sys-q')
       sq.type = 'button'
@@ -2181,6 +2197,7 @@ function applyProjection(s, values) {
   }
   if (values.modelSelection && values.modelSelection.next) {
     s.modelSel = values.modelSelection.next
+    if (values.modelSelection.lastUsed) s.modelLastUsed = values.modelSelection.lastUsed
     if (sheetSession === s.id && s.models) refreshSheetViews(s)
   }
   if (values.imageLimits) s.imageLimits = values.imageLimits
@@ -2937,7 +2954,72 @@ async function renderNew() {
     chip.onclick = () => { newPreset = p.id; vibrate(8); prow.querySelectorAll('.chip').forEach((x) => x.classList.remove('sel')); chip.classList.add('sel') }
     prow.appendChild(chip)
   }
+  renderNewModelRow()
 }
+/* 新会话的模型行：宿主语义＝新会话沿用「上次在任何会话里选过的模型」（selectModel 会写全局默认）。
+   这里显示将要用的模型，也可以改（改了在创建后立刻 selectModel，同时也会更新全局默认）。 */
+let newModelSel = null   // null = 跟随全局默认
+function ensureModelCat() {
+  if (S.modelCat) return Promise.resolve(S.modelCat)
+  if (S.modelCatP) return S.modelCatP
+  S.modelCatP = rpc('session/modelCatalog', {})
+    .then((v) => { S.modelCat = v; S.modelCatP = null; return v })
+    .catch((e) => { S.modelCatP = null; throw e })
+  return S.modelCatP
+}
+function renderNewModelRow() {
+  const h = $('#new-model-h'), row = $('#new-model-row')
+  if (!h || !row) return
+  h.textContent = '模型'
+  row.textContent = ''
+  const box = btnize(el('div', 'pick-ws'))
+  const wi = el('div', 'ws-ico'); wi.appendChild(icon('chat', 17))
+  box.appendChild(wi)
+  const mid = el('div'); mid.style.minWidth = '0'; mid.style.flex = '1'
+  ensureModelCat()
+    .then((cat) => {
+      const cur = newModelSel || cat.default || {}
+      mid.appendChild(el('div', 'ws-name', modelNameOf({ models: cat }, cur) + (newModelSel ? '' : '（默认）')))
+      mid.appendChild(el('div', 'ws-path', '新会话沿用上次选择的模型；这里改也会更新默认'))
+      box.onclick = () => { vibrate(8); openNewModelSheet() }
+    })
+    .catch(() => {
+      mid.appendChild(el('div', 'ws-name', '模型目录加载失败'))
+      mid.appendChild(el('div', 'ws-path', '点按重试'))
+      box.onclick = () => { vibrate(8); S.modelCat = null; renderNewModelRow() }
+    })
+  box.appendChild(mid)
+  box.appendChild(el('span', 'r-chev', '›'))
+  row.appendChild(box)
+}
+/* 新会话的模型选择浮层：与 ⋯ 面板同构（当前置顶＋强度就地改），只是 apply 记在本地 */
+function openNewModelSheet() {
+  let ov = $('#nm-ov')
+  if (!ov) {
+    ov = el('div', 'sheet-overlay')
+    ov.id = 'nm-ov'
+    ov.innerHTML = '<div class="sheet q-sheet"><div class="grabber"></div><div class="qd-head"><span class="qd-title">模型</span><span class="qd-cnt"></span><button class="think-close" id="nm-close" type="button" aria-label="关闭">✕</button></div><div class="qd-list" id="nm-list"></div></div>'
+    document.querySelector('#app').appendChild(ov)
+    ov.addEventListener('click', (e) => { if (e.target === ov) closeNewModelSheet() })
+    $('#nm-close').onclick = closeNewModelSheet
+  }
+  const list = $('#nm-list')
+  const render = (cat) => {
+    list.textContent = ''
+    const cur = newModelSel || cat.default || {}
+    const apply = (g, mod, effort) => {
+      newModelSel = { provider: g.id, model: mod.id, ...(effort ? { reasoningEffort: effort } : {}) }
+      render(cat)
+      renderNewModelRow()
+    }
+    renderModelPickerInto(list, cat, cur, apply, null)
+    const note = el('div', 'sheet-note', '选择会保存为全局默认：之后的新会话（手机与桌面）都会沿用。')
+    list.appendChild(note)
+  }
+  ensureModelCat().then(render).catch(() => {})
+  ovSet('nm-ov', true)
+}
+function closeNewModelSheet() { ovSet('nm-ov', false); renderNewModelRow() }
 /* 工作区有两种来源，创建会话时的定位参数必须跟着变：
    - workspace/follow 注册表项：workspaceId 是不透明 id（0f7d3c66-…），只能传 workspaceId
    - session/list 的 cwd 推导项：workspaceId 就是路径，只能传 cwd
@@ -2971,6 +3053,10 @@ async function startSession() {
     const s = sess(v.sessionId)
     s.blank = !text
     s.createdHere = true  // 本机创建：即使为空也保留在列表里
+    if (newModelSel) {
+      // 新会话选了模型：创建后立刻应用（首条消息就用它）；同时也会写全局默认（宿主语义）
+      try { await rpc('session/selectModel', { request: { sessionId: v.sessionId, provider: newModelSel.provider, model: newModelSel.model, ...(newModelSel.reasoningEffort ? { reasoningEffort: newModelSel.reasoningEffort } : {}) } }) } catch (e2) {}
+    }
     s.updatedAt = Date.now()
     if (ws && ws.path) s.cwd = ws.path
     location.hash = '#/s/' + v.sessionId
@@ -3048,8 +3134,30 @@ async function cancelSession(id) {
 let sheetSession = null
 function loadModels(s) {
   rpc('session/modelCatalog', {})
-    .then((v) => { s.models = v; if (sheetSession === s.id) refreshSheetViews(s) })
+    .then((v) => {
+      s.models = v
+      if (sheetSession === s.id) refreshSheetViews(s)
+      if (S.current === s.id && s.items.some((x) => x.kind === 'sys' && x.modelSel)) scheduleRender(s)   // 目录到了：模型标记行从原始 id 换成正式名
+    })
     .catch((e) => { s.models = { error: e.message }; if (sheetSession === s.id) refreshSheetViews(s) })
+}
+/* 目录里的显示名（含强度）；目录没到就退回原始 id */
+function modelNameOf(s, sel) {
+  let name = sel.model, ef = sel.reasoningEffort || ''
+  if (s && s.models && Array.isArray(s.models.groups)) {
+    outer: for (const g of s.models.groups) {
+      if (g.id !== sel.provider) continue
+      for (const m of g.models || []) {
+        if (m.id !== sel.model) continue
+        name = m.name
+        const efs = m.reasoning && m.reasoning.efforts
+        const ef2 = efs && efs.find((x) => x.id === sel.reasoningEffort)
+        if (ef2) ef = ef2.name
+        break outer
+      }
+    }
+  }
+  return name + (ef ? ' · ' + ef : '')
 }
 function openSheet(s) {
   sheetSession = s.id
@@ -3123,7 +3231,8 @@ async function applyModel(s, group, mod, effort) {
     if (v && v.selected) s.modelSel = v.selected
     refreshSheetViews(s)
     vibrate(10)
-    toast('已切换：' + mod.name + (effort ? ' · ' + effort : ''))
+    const label = mod.name + (effort ? ' · ' + effort : '')
+    toast(s.running ? '已切换：' + label + '（下一轮生效）' : '已切换：' + label)
   } catch (e) { toast('切换失败：' + e.message, true) }
 }
 async function applyPermission(s, opt) {
@@ -3200,7 +3309,7 @@ function renderSheet(s) {
   c.appendChild(copyRow)
   c.appendChild(el('div', 'sheet-note', '菜单就这一屏。点带 › 的行进入对应设置。'))
 }
-/* ---- 模型面板：顶部当前模型强度（只换强度一步到位）+ 分组单行模型清单 ---- */
+/* ---- 模型面板：当前模型置顶（强度就在旁边，选完模型立刻能调强度）+ 分组清单 ---- */
 function openModelPanel(s) {
   openSubPanel('model', '模型', () => renderModelPanel(s))
 }
@@ -3220,29 +3329,60 @@ function renderModelPanel(s) {
     return
   }
   const cur = s.modelSel || m.default
+  const apply = (g, mod, effort) => applyModel(s, g, mod, effort)
+  renderModelPickerInto(body, m, cur, apply, s)
+}
+/* 共享选择器：顶部「当前」卡（模型名 + 说明 + 强度 chips 就地切换）+ 分组模型清单。
+   会话面板与新会话页共用；apply 由调用方决定（RPC 切换 / 本地记录）。 */
+function renderModelPickerInto(body, m, cur, apply, s) {
   const curMod = (() => {
     for (const g of m.groups || []) for (const mod of g.models || []) if (g.id === cur.provider && mod.id === cur.model) return mod
     return null
   })()
-  // 思考强度：仅当前模型支持时显示，选择即切换（不必再进一层）
-  if (curMod && curMod.reasoning && curMod.reasoning.efforts && curMod.reasoning.efforts.length) {
-    const g = (() => { for (const gg of m.groups || []) for (const mm of gg.models || []) if (gg.id === cur.provider && mm.id === cur.model) return gg; return null })()
-    body.appendChild(el('div', 'sheet-group', '思考强度 · ' + curMod.name))
-    const chips = el('div', 'chip-row')
-    for (const ef of curMod.reasoning.efforts) {
+  const curGrp = (() => {
+    for (const g of m.groups || []) for (const mod of g.models || []) if (g.id === cur.provider && mod.id === cur.model) return g
+    return null
+  })()
+  // 当前卡片：选完模型它会立刻变成新模型（强度就在旁边，不用再去别处找）
+  const card = el('div', 'model-cur')
+  card.appendChild(el('div', 'mc-tag', '当前'))
+  card.appendChild(el('div', 'mc-name', curMod ? curMod.name : (cur.model || '—')))
+  if (curMod && curMod.description) card.appendChild(el('div', 'mc-desc', curMod.description))
+  const efs = curMod && curMod.reasoning && curMod.reasoning.efforts
+  if (efs && efs.length) {
+    const chips = el('div', 'chip-row mc-efs')
+    for (const ef of efs) {
       const chip = btnize(el('span', 'chip' + (ef.id === cur.reasoningEffort ? ' sel' : ''), ef.name))
-      chip.title = ef.description || ''
-      chip.onclick = () => { vibrate(8); if (ef.id !== cur.reasoningEffort && g) applyModel(s, g, curMod, ef.id) }
+      if (ef.description) chip.appendChild(el('span', 'ef-hint', 'ⓘ'))
+      chip.onclick = () => { vibrate(8); if (ef.id !== cur.reasoningEffort && curGrp) apply(curGrp, curMod, ef.id) }
+      // ⓘ 点开说明（title 在触屏上不可见）
+      if (ef.description) {
+        const hint = chip.querySelector('.ef-hint')
+        const showEf = (ev) => {
+          ev.stopPropagation()
+          toast(ef.name + '：' + ef.description)
+        }
+        hint.addEventListener('click', showEf)
+      }
       chips.appendChild(chip)
     }
-    body.appendChild(chips)
+    card.appendChild(chips)
   } else {
-    body.appendChild(el('div', 'sheet-note', '当前模型没有思考强度选项'))
+    card.appendChild(el('div', 'mc-noefs', '该模型没有思考强度'))
   }
+  body.appendChild(card)
+  // 运行中切换：明确「下一轮生效」，别让人以为当前这轮就换了
+  if (s && s.running && s.modelLastUsed) {
+    const lu = s.modelLastUsed
+    if (lu.provider !== cur.provider || lu.model !== cur.model || lu.reasoningEffort !== cur.reasoningEffort) {
+      body.appendChild(el('div', 'sheet-note', '本轮仍在用 ' + modelNameOf(s, lu) + '，下一条消息起才用上面的选择'))
+    }
+  }
+  // 模型清单
   body.appendChild(el('div', 'sheet-group', '切换模型'))
   for (const g of m.groups || []) {
     body.appendChild(el('div', 'sheet-group', g.name))
-    for (const mod of g.models || []) body.appendChild(modelRow(s, g, mod, cur))
+    for (const mod of g.models || []) body.appendChild(modelRow(s, g, mod, cur, apply))
   }
   for (const f of m.failures || []) body.appendChild(el('div', 'sheet-note', '⚠️ ' + f.name + '：' + f.message))
 }
@@ -3843,16 +3983,19 @@ function sessionText(s) {
 }
 
 /* 模型行（紧凑单行）：15 个模型全铺开也不至于失控；描述不展示，强度在面板顶部统一处理 */
-function modelRow(s, g, mod, current) {
+function modelRow(s, g, mod, current, apply) {
   const isCur = !!(current && current.provider === g.id && current.model === mod.id)
   const row = btnize(el('div', 'sheet-row model-row' + (isCur ? ' sel' : '')))
   const mid = el('div'); mid.style.minWidth = '0'; mid.style.flex = '1'
   mid.appendChild(el('div', 'r-name', mod.name))
+  const hasEfs = !!(mod.reasoning && mod.reasoning.efforts && mod.reasoning.efforts.length)
+  const desc = mod.description || (!hasEfs ? '无思考强度' : '')
+  if (desc) mid.appendChild(el('div', 'r-desc', desc))
   row.appendChild(mid)
   if (isCur) row.appendChild(el('span', 'check', '✓'))
   row.onclick = () => {
     if (isCur) return
-    applyModel(s, g, mod, (mod.reasoning && mod.reasoning.defaultEffort) || undefined)
+    apply(g, mod, (mod.reasoning && mod.reasoning.defaultEffort) || undefined)
   }
   return row
 }
@@ -4022,6 +4165,8 @@ function buildShell() {
       <div id="new-ws-list"></div>
       <div class="ws-group" id="preset-group-h"></div>
       <div class="preset-row" id="preset-row"></div>
+      <div class="ws-group" id="new-model-h"></div>
+      <div id="new-model-row"></div>
       <div class="ws-group" id="new-input-h"></div>
       <div class="new-input" id="new-input" contenteditable data-ph="帮我把 …" aria-label="首条消息"></div>
       <button class="start-btn" id="start-btn">开始会话</button>
