@@ -3832,8 +3832,6 @@ function renderSheet(s) {
       toast('已归档（可在桌面端恢复）')
     } catch (e) { toast('归档失败：' + e.message, true) }
   }))
-  // ---- 原型：这是怎么工作的（hi-fi，评审入口；不要可整体删掉这一段）----
-  c.appendChild(valueRow('这是怎么工作的？', '一分钟看懂它怎么替你干活', '', () => { closeSheet(); openHowItWorks(s) }))
   c.appendChild(el('div', 'sheet-note', '点带 › 的行进入对应设置。'))
 }
 /* 重命名：⋯ → 会话 → 重命名，就地编辑保存 */
