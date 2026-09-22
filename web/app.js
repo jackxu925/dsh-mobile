@@ -3344,7 +3344,66 @@ function renderSheet(s) {
     })
   }
   c.appendChild(copyRow)
-  c.appendChild(el('div', 'sheet-note', '菜单就这一屏。点带 › 的行进入对应设置。'))
+  // ---- 会话：重命名 / 分叉 / 归档（原只在侧栏会话菜单里有，正文里也要能直接做）----
+  c.appendChild(el('div', 'sheet-group', '会话'))
+  const t = s.title || ''
+  c.appendChild(valueRow('重命名', '改当前会话的标题', t.length > 14 ? t.slice(0, 14) + '…' : (t || '未命名'), () => openRenamePanel(s)))
+  c.appendChild(valueRow('分叉', '从最近完成的轮复制出新会话', '', async () => {
+    vibrate(8)
+    try {
+      closeSheet()
+      toast('正在分叉…')
+      const v = await rpc('session/fork', { request: { sessionId: s.id } })
+      toast('已分叉 ✓ 正在打开')
+      location.hash = '#/s/' + v.sessionId
+      flushForkTail(v.sessionId)
+    } catch (e) { toast('分叉失败：' + e.message, true) }
+  }))
+  c.appendChild(valueRow('归档', '从列表移除，可在桌面端恢复', '', async () => {
+    vibrate(8)
+    try {
+      const av = await rpc('workspace/archiveSession', { request: { sessionId: s.id } })
+      if (av && Array.isArray(av.archivedSessionIds)) S.archived = new Set(av.archivedSessionIds)
+      S.sessions.delete(s.id)
+      closeSheet()
+      location.hash = '#/'   // 当前会话没了：回主页
+      renderList()
+      toast('已归档（可在桌面端恢复）')
+    } catch (e) { toast('归档失败：' + e.message, true) }
+  }))
+  c.appendChild(el('div', 'sheet-note', '点带 › 的行进入对应设置。'))
+}
+/* 重命名：⋯ → 会话 → 重命名，就地编辑保存 */
+function openRenamePanel(s) {
+  openSubPanel('rename', '重命名', (body) => {
+    body.classList.add('rn-body')
+    const box = el('div', 'ren-box')
+    box.contentEditable = 'plaintext-only'
+    if (box.contentEditable !== 'plaintext-only') box.contentEditable = 'true'
+    box.dataset.ph = '输入新标题'
+    box.textContent = s.title || ''
+    const save = async () => {
+      const t = editableText(box).replace(/\n+/g, ' ').trim()
+      if (!t) { toast('标题不能为空', true); return }
+      vibrate(8)
+      try {
+        const v = await rpc('session/rename', { request: { sessionId: s.id, title: t } })
+        if (v && v.title !== undefined) s.title = v.title   // 用宿主回的规整标题（随后 session/title 事件也会到）
+        closeSubPanel(); closeSheet()
+        renderListSoon()
+        renderChat(s, true)   // 顶部标题/列表刷新
+        toast('已重命名 ✓')
+      } catch (e) { toast('重命名失败：' + e.message, true) }
+    }
+    const btn = el('button', 'ren-save', '保存')
+    btn.type = 'button'
+    btn.onclick = save
+    box.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); save() } })
+    body.appendChild(el('div', 'sheet-note', '标题用于会话列表与桌面端同步显示。'))
+    body.appendChild(box)
+    body.appendChild(btn)
+    setTimeout(() => { box.focus(); document.getSelection().selectAllChildren(box) }, 180)   // 等面板滑入再聚焦全选
+  })
 }
 /* ---- 模型面板：当前模型置顶（强度就在旁边，选完模型立刻能调强度）+ 分组清单 ---- */
 function openModelPanel(s) {

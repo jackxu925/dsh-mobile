@@ -747,6 +747,13 @@ html.light .queue-chip { border-color: rgba(15,23,42,.22); }
 @keyframes tkd-wave { 0%,100% { transform:translateY(0); opacity:.5 } 50% { transform:translateY(-2.4px); opacity:1 } }
 /* 思考抽屉（复用 .sheet 的外观与手势） */
 .think-sheet { max-height:76%; }
+/* 重命名编辑器（⋯ → 会话 → 重命名） */
+.rn-body { padding: 4px 14px 10px; }
+.ren-box { margin-top: 6px; background: var(--bg-card); border: .5px solid var(--line); border-radius: 13px; padding: 12px 14px; min-height: 46px; font-size: 16px; color: var(--text); outline: none; word-break: break-all; }
+.ren-box:focus { border-color: var(--accent); }
+.ren-box:empty::before { content: attr(data-ph); color: var(--text-3); }
+.ren-save { margin-top: 10px; width: 100%; min-height: 44px; border: none; border-radius: 13px; background: var(--accent); color: #fff; font-size: 15px; font-weight: 600; cursor: pointer; }
+.ren-save:active { opacity: .85; }
 .think-head { display:flex; align-items:center; gap:8px; padding:2px 16px 10px; flex:none; }
 .think-title { font-size:13px; font-weight:700; color:var(--text-2); display:flex; align-items:center; gap:6px; }
 .think-title .ic { color:var(--purple); }
