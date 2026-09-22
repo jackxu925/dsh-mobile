@@ -2941,7 +2941,7 @@ function openHowItWorks(s) {
   ov.innerHTML = '<div class="how-head"><button class="how-back" id="how-back" type="button" style="display:none">‹ 返回</button><span class="how-dots" id="how-dots"></span><button class="how-x" id="how-x" type="button">✕</button></div><div class="how-body" id="how-body"></div>'
   document.body.appendChild(ov)
   $('#how-x').onclick = () => howClose()
-  $('#how-back').onclick = () => { if (HOW.view === 'replay') howShowBreakdown(HOW.ctx.an.sid); else if (HOW.view === 'breakdown' || HOW.view === 'picker') howStoryView(); }
+  $('#how-back').onclick = () => { if (HOW.view === 'replay' || HOW.view === 'dialogue') howShowBreakdown(HOW.ctx.an.sid); else if (HOW.view === 'breakdown' || HOW.view === 'picker') howStoryView(); }
   HOW.ctx = { s }
   howBuildStory(s)
   document.documentElement.style.overflow = 'hidden'
@@ -3110,6 +3110,112 @@ async function howShowBreakdown(sid) {
   btn.type = 'button'
   btn.onclick = () => howReplay(an)
   body.appendChild(btn)
+  const btn2 = el('button', 'how-cta ghost', '📞 电话记录：一轮轮看它俩说了什么')
+  btn2.type = 'button'
+  btn2.onclick = () => howDialogue(an)
+  body.appendChild(btn2)
+}
+/* —— 电话记录：逐轮还原 Harness(input) ↔ 模型(output) —— */
+function howToolResultText(e) {
+  const c = (e.data && e.data.message && e.data.message.content) || []
+  for (const blk of c) {
+    if (blk && blk.type === 'tool-result' && Array.isArray(blk.content)) {
+      return blk.content.map((x) => x.text || '').join('').trim()
+    }
+  }
+  return null
+}
+function howPlainText(c) { return (c || []).map((b) => b.text || '').join('') }
+function howDetails(summary, full, mono) {
+  const d = el('details', 'how-det' + (mono ? ' mono' : ''))
+  const sm = el('summary', null, summary)
+  const pre = el('pre', null, full)
+  d.append(sm, pre)
+  return d
+}
+function howDialogue(an) {
+  HOW.view = 'dialogue'
+  $('#how-back').style.display = ''
+  const body = $('#how-body')
+  body.textContent = ''
+  const b = an.best
+  const recs = (an.recs || []).filter((e) => e.seq >= b.start - 6 && e.seq <= b.end)
+  const inTurn = (e) => e.seq >= b.start   // 前移 6 个事件只为接住 turn 开始前的用户消息；step 计数只认轮内
+  // 分轮：step/start 开一通新电话；两通之间落地的 tool/result / 用户补充 / 摘要 → 下一通要「念给它听」的新内容
+  const rounds = []
+  let cur = null, pendingNew = [], n = 0, firstUser = ''
+  for (const e of recs) {
+    if (e.type === 'step/start' && inTurn(e)) {
+      n++
+      cur = { n, news: pendingNew, thinks: 0, thinkTxt: '', calls: [], says: [] }
+      pendingNew = []
+      rounds.push(cur)
+      continue
+    }
+    if (e.type === 'step/end') { cur = null; continue }
+    if (!cur) {
+      if (e.type === 'tool/result') {
+        const t = howToolResultText(e)
+        if (t != null) pendingNew.push({ ic: '📄', pv: '执行结果（' + t.length + ' 字）', full: t.slice(0, 1200) })
+      } else if (e.type === 'user/message' && e.data && e.data.source && e.data.source.kind === 'user') {
+        const t = howPlainText(e.data.content).replace(/\n+/g, ' ').trim()
+        if (t) { pendingNew.push({ ic: '🙋', pv: '用户插话：「' + t.slice(0, 40) + (t.length > 40 ? '…' : '') + '」', full: t }); if (!firstUser) firstUser = t }
+      } else if (e.type && e.type.indexOf('compaction/') === 0) {
+        pendingNew.push({ ic: '📦', pv: '案卷太厚，做了一次摘要（压缩后重念）', full: '' })
+      }
+      continue
+    }
+    if (e.type === 'assistant/message') {
+      const c = (e.data && (e.data.message ? e.data.message.content : e.data.content)) || []
+      const rs = c.filter((x) => x.type === 'reasoning' || x.type === 'thinking').map((x) => x.text || '').join('')
+      if (rs) { cur.thinks += rs.length; cur.thinkTxt = (cur.thinkTxt ? cur.thinkTxt + '\n' : '') + rs }
+      const tx = c.filter((x) => x.type === 'text').map((x) => x.text || '').join('')
+      if (tx.trim()) cur.says.push(tx)
+    }
+    if (e.type === 'tool/call') {
+      let args = {}; try { args = JSON.parse(e.data.arguments || '{}') } catch (err) {}
+      cur.calls.push({ name: e.data.name, args })
+    }
+  }
+  if (!firstUser) firstUser = b.userText || '（新任务）'
+  body.appendChild(el('div', 'how-big', '电话记录'))
+  body.appendChild(el('div', 'how-desc', '🧠 专家（模型）：只有脑子、耳朵、嘴——会想、会听、会说，自己动不了手。\n🤖 助理（Harness）：有手有脚有眼睛——替它翻文件、跑命令，再把结果念给它听。\n\n每一通电话 = 一轮 input / output。点任何一条可展开真实内容。'))
+  body.appendChild(el('div', 'how-dlgmeta', '这一轮共 ' + rounds.length + ' 通电话'))
+  const list = el('div', 'how-dlg')
+  for (const r of rounds) {
+    const div = el('div', 'how-dlg-div', '☎️ 第 ' + r.n + ' 通')
+    list.appendChild(div)
+    // —— 助理的嘴：input（念给它听）——
+    const lb = el('div', 'how-dlg-b l')
+    lb.appendChild(el('div', 'who', '🤖 助理念给它听（input）'))
+    if (r.n === 1) {
+      lb.appendChild(el('div', 'ln', '规则手册 + 工具清单（它能请你做的一切）'))
+      lb.appendChild(el('div', 'ln', '用户的新消息'))
+      lb.appendChild(howDetails('🙋「' + firstUser.slice(0, 36) + (firstUser.length > 36 ? '…' : '') + '」', firstUser, false))
+    } else {
+      lb.appendChild(el('div', 'ln', '把到目前为止的案卷从头念一遍' + (r.news.length ? '，新增 ' + r.news.length + ' 页：' : '（本轮没有新内容）')))
+    }
+    for (const nw of r.news) {
+      if (nw.full) lb.appendChild(howDetails(nw.ic + ' ' + nw.pv, nw.full, nw.ic === '📄'))
+      else lb.appendChild(el('div', 'ln', nw.ic + ' ' + nw.pv))
+    }
+    list.appendChild(lb)
+    // —— 专家的嘴：output ——
+    const rb = el('div', 'how-dlg-b r')
+    rb.appendChild(el('div', 'who', '🧠 专家回答（output）'))
+    if (r.thinks) rb.appendChild(howDetails('💭 先沉吟了 ' + (r.thinks > 999 ? Math.round(r.thinks / 100) / 10 + ' 千' : r.thinks) + ' 字', (r.thinkTxt || '').slice(0, 2500) + (r.thinkTxt.length > 2500 ? '\n…（太长已截断）' : ''), false))
+    for (const c2 of r.calls) {
+      const cmd = c2.args.command || c2.args.file_path || c2.args.path || c2.args.pattern || ''
+      const pv = howToolLabel(c2.name, c2.args)[1]
+      rb.appendChild(howDetails('👄「' + pv + (cmd ? '：' + String(cmd).slice(0, 30) : '') + '」', c2.name + ' ' + JSON.stringify(c2.args, null, 1), true))
+    }
+    for (const tx of r.says) {
+      rb.appendChild(howDetails('👄 汇报：「' + tx.replace(/\n+/g, ' ').slice(0, 36) + (tx.length > 36 ? '…' : '') + '」', tx.slice(0, 2500), false))
+    }
+    if (!r.thinks && !r.calls.length && !r.says.length) rb.appendChild(el('div', 'ln', '（这一通没说话就挂了）'))
+    list.appendChild(rb)
+  }
+  body.appendChild(list)
 }
 /* —— 导演视角回放（真实事件加速重演）—— */
 function howToolLabel(name, args) {

@@ -747,6 +747,24 @@ html.light .queue-chip { border-color: rgba(15,23,42,.22); }
 @keyframes tkd-wave { 0%,100% { transform:translateY(0); opacity:.5 } 50% { transform:translateY(-2.4px); opacity:1 } }
 /* 思考抽屉（复用 .sheet 的外观与手势） */
 .think-sheet { max-height:76%; }
+/* 电话记录（逐轮 input/output） */
+.how-cta.ghost { background:var(--bg-card); color:var(--text); border:1px solid var(--line); margin-top:9px; }
+.how-dlgmeta { font-size:12px; color:var(--text-3); margin:6px 0 14px; }
+.how-dlg { display:flex; flex-direction:column; gap:9px; }
+.how-dlg-div { align-self:center; font-size:11px; color:var(--accent); background:var(--accent-soft); border-radius:12px; padding:3px 12px; margin:6px 0 1px; font-weight:700; }
+.how-dlg-b { max-width:92%; border-radius:14px; padding:9px 11px; display:flex; flex-direction:column; gap:6px; }
+.how-dlg-b.l { align-self:flex-start; background:var(--bg-card); border:1px solid rgba(52,199,89,.22); border-top-left-radius:4px; }
+.how-dlg-b.r { align-self:flex-end; background:rgba(191,90,242,.07); border:1px solid rgba(191,90,242,.22); border-top-right-radius:4px; }
+.how-dlg-b .who { font-size:10.5px; color:var(--text-3); font-weight:700; }
+.how-dlg-b.r .who { color:var(--purple); }
+.how-dlg-b.l .who { color:var(--green); }
+.how-dlg-b .ln { font-size:13px; color:var(--text-2); line-height:1.55; }
+.how-det { font-size:13px; color:var(--text-2); background:var(--bg-elev); border-radius:9px; overflow:hidden; }
+.how-det summary { padding:7px 10px; cursor:pointer; list-style:none; color:var(--text); }
+.how-det summary::before { content:'▸ '; color:var(--text-3); font-size:11px; }
+.how-det[open] summary::before { content:'▾ '; }
+.how-det pre { margin:0; padding:9px 10px 10px; font-size:11px; line-height:1.6; color:var(--text-2); white-space:pre-wrap; word-break:break-word; max-height:260px; overflow-y:auto; border-top:1px solid var(--line); font-family:var(--mono); }
+.how-det:not(.mono) pre { font-family:var(--font); font-size:12.5px; }
 /* ===== 「这是怎么工作的」hi-fi 原型 ===== */
 #how-ov { position:fixed; inset:0; z-index:9999; background:var(--bg); display:flex; flex-direction:column; }
 .how-head { flex:none; height:52px; display:flex; align-items:center; gap:12px; padding:0 14px; padding-top:env(safe-area-inset-top,0); border-bottom:.5px solid var(--line); }
