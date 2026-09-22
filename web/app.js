@@ -469,7 +469,7 @@ function foldEvent(s, event, view) {
   if (!s._pendingCalls) s._pendingCalls = []
   switch (t) {
     case 'user/message': {
-      if (d.source && d.source.kind && d.source.kind !== 'user') return  // 注入类上下文不显示
+      if (d.source && d.source.kind && d.source.kind !== 'user') return  // 注入类上下文不显示（插话的持久事件也是 user 来源，靠 rpcId 与乐观回显对上）
       const text = textOf(d.content)
       const images = imageBlocksOf(d.content)
       if (!text.trim() && !images.length) return
@@ -482,6 +482,17 @@ function foldEvent(s, event, view) {
           //（折叠块只剩 attachmentId，换了会丢掉尺寸占位、回到 80px 占位再撑开的老路）
           const keepImgs = (s.items[i].images && s.items[i].images.length) ? s.items[i].images : (images.length ? images : null)
           s.items[i] = { ...s.items[i], text: text || s.items[i].text, images: keepImgs, pending: false, failed: false, time: event.time }
+          s.lastPreview = text || s.lastPreview
+          break
+        }
+      }
+      // 插话回显兜底：队列广播的 source 是空对象（拿不到 rpcId），按文本对上就地转正，别重复上屏
+      if (text) {
+        const t24 = text.slice(0, 24)
+        const j = s.items.findIndex((x) => x.kind === 'user' && x.steerEcho && t24 && (x.text || '').slice(0, 24) === t24)
+        if (j >= 0) {
+          const keepImgs2 = (s.items[j].images && s.items[j].images.length) ? s.items[j].images : (images.length ? images : null)
+          s.items[j] = { ...s.items[j], text, images: keepImgs2, pending: false, steerEcho: false, failed: false, time: event.time, seq: event.seq, rpcId: rid || s.items[j].rpcId }
           s.lastPreview = text || s.lastPreview
           break
         }
@@ -1145,7 +1156,8 @@ function itemNodeInner(s, item) {
       // meta 行：时间 · 复制（右对齐）；失败态在此重试
       const meta = el('div', 'meta-row')
       meta.appendChild(el('span', 'meta-time', fmtTime(item.time)))
-      if (item.pending) meta.appendChild(el('span', 'meta-pending', '发送中…'))
+      if (item.pending) meta.appendChild(el('span', 'meta-pending', item.steering ? '插话中…' : '发送中…'))
+      if (item.steering && !item.pending) meta.appendChild(el('span', 'meta-steer', '⚡ 插话'))
       if (item.text) {
         const cp = metaIcon('copy', '复制这条消息')
         cp.onclick = () => { vibrate(8); copyText(item.text, (ok) => toast(ok ? '已复制 ✓' : '复制失败，请重试', !ok)) }
@@ -2791,8 +2803,20 @@ function openQSheet(s, q) {
     vibrate(8)
     try {
       await rpc('session/updateQueue', { request: { sessionId: sid, itemId, action: { kind: 'steer' } } })
+      // 乐观上屏（桌面同款语义）：宿主要等 agent 消费才产生 user/message 事件，
+      // 在此之前 chip 就该消失、消息就该出现在对话流里，等到持久事件再就地转正
+      const qi = (s.queue || []).findIndex((x) => x.id === itemId)
+      const qm = qi >= 0 ? s.queue[qi] : null
+      if (qi >= 0) s.queue.splice(qi, 1)
+      const content = (qm && qm.message && qm.message.content) || []
+      const text = textOf(content)
+      const images = imageBlocksOf(content)
+      const src = qm && qm.message && qm.message.source
+      const rid = src && (src.requestId || src.rpcId) || null   // 与持久事件的 source.rpcId 同值：到了就地转正（现成去重逻辑）
+      s.items.push({ kind: 'user', text, images: images.length ? images : null, time: Date.now(), pending: true, steering: true, steerEcho: true, rpcId: rid })
       toast('已转为插话 ⚡')
       closeQSheet()
+      if (S.current === sid) { renderChat(s, true); renderQueueStrip(s) } else renderQueueStrip(s)
     } catch (e) { toast('转换失败：' + e.message, true) }
   }
   $('#q-a-del').onclick = async () => {
@@ -3005,6 +3029,8 @@ function openNewModelSheet() {
   }
   const list = $('#nm-list')
   const render = (cat) => {
+    const oldSc = list.querySelector('.mp-left') || list.querySelector('.mp-cols.one')
+    if (oldSc) mpLeftScroll = oldSc.scrollTop   // 清空前读旧滚动
     list.textContent = ''
     const cur = newModelSel || cat.default || {}
     const apply = (g, mod, effort) => {
@@ -3316,6 +3342,8 @@ function openModelPanel(s) {
 function renderModelPanel(s) {
   const body = $('#sub-body')
   if (!body) return
+  const oldSc = body.querySelector('.mp-left') || body.querySelector('.mp-cols.one')   // 清空前同步读旧滚动（事件有竞态，直接读最稳）
+  if (oldSc) mpLeftScroll = oldSc.scrollTop
   body.textContent = ''
   const m = s.models
   if (!m) { body.appendChild(el('div', 'sheet-note', '加载中…')); return }
@@ -3332,9 +3360,57 @@ function renderModelPanel(s) {
   const apply = (g, mod, effort) => applyModel(s, g, mod, effort)
   renderModelPickerInto(body, m, cur, apply, s)
 }
-/* 共享选择器：顶部「当前」卡（模型名 + 说明 + 强度 chips 就地切换）+ 分组模型清单。
+/* 共享选择器（两栏式）：左＝模型清单，右＝选中模型的思考强度（选了模型才出现）。
    会话面板与新会话页共用；apply 由调用方决定（RPC 切换 / 本地记录）。 */
+let mpLeftScroll = null   // 左列滚动位置：apply 后整面板重渲染，别把用户刚滚到的位置丢掉
 function renderModelPickerInto(body, m, cur, apply, s) {
+  // 运行中切换：明确「下一轮生效」，别让人以为当前这轮就换了
+  if (s && s.running && s.modelLastUsed) {
+    const lu = s.modelLastUsed
+    if (lu.provider !== cur.provider || lu.model !== cur.model || lu.reasoningEffort !== cur.reasoningEffort) {
+      body.appendChild(el('div', 'sheet-note', '本轮仍在用 ' + modelNameOf(s, lu) + '，下一条消息起才用新的选择'))
+    }
+  }
+  // 选中模型有强度才分两栏；没有就整栏只放模型列表（右栏根本不出现）
+  const curMod = (() => {
+    for (const g of m.groups || []) for (const mod of g.models || []) if (g.id === cur.provider && mod.id === cur.model) return mod
+    return null
+  })()
+  const hasEfs = !!(curMod && curMod.reasoning && curMod.reasoning.efforts && curMod.reasoning.efforts.length)
+  const cols = el('div', hasEfs ? 'mp-cols' : 'mp-cols one')
+  const left = el('div', 'mp-left')
+  const right = hasEfs ? el('div', 'mp-right') : null
+  // 左栏：模型（分组小标题 + 紧凑行）
+  for (const g of m.groups || []) {
+    left.appendChild(el('div', 'mp-grp', g.name))
+    for (const mod of g.models || []) {
+      const isCur = g.id === cur.provider && mod.id === cur.model
+      const row = btnize(el('div', 'mp-mod' + (isCur ? ' sel' : '')))
+      const nm = el('span', 'mp-name', mod.name)
+      row.appendChild(nm)
+      const hasEfs = !!(mod.reasoning && mod.reasoning.efforts && mod.reasoning.efforts.length)
+      if (!hasEfs) row.appendChild(el('span', 'mp-tag', '无强度'))
+      row.onclick = () => {
+        if (isCur) return
+        vibrate(8)
+        apply(g, mod, (mod.reasoning && mod.reasoning.defaultEffort) || undefined)
+      }
+      left.appendChild(row)
+    }
+  }
+  // 右栏：选中模型的说明 + 思考强度（只在有强度的模型上出现）
+  if (right) renderMpRight(right, m, cur, apply)
+  cols.append(left)
+  if (right) cols.appendChild(right)
+  body.appendChild(cols)
+  for (const f of m.failures || []) body.appendChild(el('div', 'sheet-note', '⚠️ ' + f.name + '：' + f.message))
+  // 滚动位置保留：两栏时滚的是左栏自身，单栏时滚的是外层容器（.mp-left 此时 overflow:visible）
+  const scroller = hasEfs ? left : cols
+  if (mpLeftScroll != null) scroller.scrollTop = mpLeftScroll
+}
+/* 右栏内容：说明 + 强度单选列表（说明直接展示，不再藏在触屏看不见的 title 里） */
+function renderMpRight(right, m, cur, apply) {
+  right.textContent = ''
   const curMod = (() => {
     for (const g of m.groups || []) for (const mod of g.models || []) if (g.id === cur.provider && mod.id === cur.model) return mod
     return null
@@ -3343,48 +3419,22 @@ function renderModelPickerInto(body, m, cur, apply, s) {
     for (const g of m.groups || []) for (const mod of g.models || []) if (g.id === cur.provider && mod.id === cur.model) return g
     return null
   })()
-  // 当前卡片：选完模型它会立刻变成新模型（强度就在旁边，不用再去别处找）
-  const card = el('div', 'model-cur')
-  card.appendChild(el('div', 'mc-tag', '当前'))
-  card.appendChild(el('div', 'mc-name', curMod ? curMod.name : (cur.model || '—')))
-  if (curMod && curMod.description) card.appendChild(el('div', 'mc-desc', curMod.description))
+  right.appendChild(el('div', 'mp-grp', '思考强度' + (curMod ? ' · ' + curMod.name : '')))
+  if (curMod && curMod.description) right.appendChild(el('div', 'mp-desc', curMod.description))
   const efs = curMod && curMod.reasoning && curMod.reasoning.efforts
   if (efs && efs.length) {
-    const chips = el('div', 'chip-row mc-efs')
     for (const ef of efs) {
-      const chip = btnize(el('span', 'chip' + (ef.id === cur.reasoningEffort ? ' sel' : ''), ef.name))
-      if (ef.description) chip.appendChild(el('span', 'ef-hint', 'ⓘ'))
-      chip.onclick = () => { vibrate(8); if (ef.id !== cur.reasoningEffort && curGrp) apply(curGrp, curMod, ef.id) }
-      // ⓘ 点开说明（title 在触屏上不可见）
-      if (ef.description) {
-        const hint = chip.querySelector('.ef-hint')
-        const showEf = (ev) => {
-          ev.stopPropagation()
-          toast(ef.name + '：' + ef.description)
-        }
-        hint.addEventListener('click', showEf)
+      const row = btnize(el('div', 'mp-ef' + (ef.id === cur.reasoningEffort ? ' sel' : '')))
+      row.appendChild(el('span', 'nm', ef.name))
+      if (ef.description) row.appendChild(el('span', 'ds', ef.description))
+      row.onclick = () => {
+        if (ef.id === cur.reasoningEffort || !curGrp) return
+        vibrate(8)
+        apply(curGrp, curMod, ef.id)
       }
-      chips.appendChild(chip)
-    }
-    card.appendChild(chips)
-  } else {
-    card.appendChild(el('div', 'mc-noefs', '该模型没有思考强度'))
-  }
-  body.appendChild(card)
-  // 运行中切换：明确「下一轮生效」，别让人以为当前这轮就换了
-  if (s && s.running && s.modelLastUsed) {
-    const lu = s.modelLastUsed
-    if (lu.provider !== cur.provider || lu.model !== cur.model || lu.reasoningEffort !== cur.reasoningEffort) {
-      body.appendChild(el('div', 'sheet-note', '本轮仍在用 ' + modelNameOf(s, lu) + '，下一条消息起才用上面的选择'))
+      right.appendChild(row)
     }
   }
-  // 模型清单
-  body.appendChild(el('div', 'sheet-group', '切换模型'))
-  for (const g of m.groups || []) {
-    body.appendChild(el('div', 'sheet-group', g.name))
-    for (const mod of g.models || []) body.appendChild(modelRow(s, g, mod, cur, apply))
-  }
-  for (const f of m.failures || []) body.appendChild(el('div', 'sheet-note', '⚠️ ' + f.name + '：' + f.message))
 }
 /* ---- 问过的问题：先出当前窗口已知的，再逐页往前补（边补边追加，不让人干等） ---- */
 function windowQuestions(s) {
@@ -3983,22 +4033,6 @@ function sessionText(s) {
 }
 
 /* 模型行（紧凑单行）：15 个模型全铺开也不至于失控；描述不展示，强度在面板顶部统一处理 */
-function modelRow(s, g, mod, current, apply) {
-  const isCur = !!(current && current.provider === g.id && current.model === mod.id)
-  const row = btnize(el('div', 'sheet-row model-row' + (isCur ? ' sel' : '')))
-  const mid = el('div'); mid.style.minWidth = '0'; mid.style.flex = '1'
-  mid.appendChild(el('div', 'r-name', mod.name))
-  const hasEfs = !!(mod.reasoning && mod.reasoning.efforts && mod.reasoning.efforts.length)
-  const desc = mod.description || (!hasEfs ? '无思考强度' : '')
-  if (desc) mid.appendChild(el('div', 'r-desc', desc))
-  row.appendChild(mid)
-  if (isCur) row.appendChild(el('span', 'check', '✓'))
-  row.onclick = () => {
-    if (isCur) return
-    apply(g, mod, (mod.reasoning && mod.reasoning.defaultEffort) || undefined)
-  }
-  return row
-}
 /* 宿主的权限 option.name 就是原始值（read-only 等），这里给出中文标签与说明 */
 const PERM_LABEL = {
   'read-only': ['只读', '只能读文件与检索，不能改动任何东西'],

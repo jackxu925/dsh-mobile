@@ -463,7 +463,28 @@ html.light .tool-trunc { color:#9a4a06; }
   .start-btn { display:block; }
 }
 
-/* 模型面板：当前模型置顶卡（强度就在旁边） */
+/* 模型选择器（两栏式）：左＝模型清单，右＝选中模型的思考强度；
+   选中的模型没有强度时整栏只放模型列表（右栏不出现） */
+.mp-cols { display:flex; gap:8px; margin: 4px 10px 6px; height: min(56vh, 460px); }
+.mp-cols.one { display:block; height: auto; max-height: min(60vh, 480px); overflow-y:auto; -webkit-overflow-scrolling:touch; }
+.mp-left { flex: 1.2; min-width: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
+.mp-cols.one .mp-left { overflow: visible; height: auto; max-height: none; }
+.mp-right { flex: 1; min-width: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; border-left: .5px solid var(--line); padding-left: 8px; }
+.mp-grp { font-size: 11px; font-weight: 700; color: var(--text-3); padding: 10px 8px 4px; }
+.mp-mod { display:flex; align-items:center; gap:6px; padding: 8px 9px; border-radius: 10px; cursor: pointer; }
+.mp-mod:active { background: var(--bg-card); }
+.mp-mod.sel { background: var(--accent-soft); }
+.mp-mod .mp-name { flex:1; min-width:0; font-size:13.5px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.mp-mod.sel .mp-name { font-weight: 650; }
+.mp-mod .mp-tag { flex:none; font-size:9px; color: var(--text-3); border:1px solid var(--line); border-radius:5px; padding:0 4px; }
+.mp-desc { font-size: 11.5px; color: var(--text-3); line-height:1.5; padding: 0 8px 6px; }
+.mp-ef { padding: 8px 10px; border-radius: 10px; cursor: pointer; display:flex; flex-direction:column; gap:1px; }
+.mp-ef:active { background: var(--bg-card); }
+.mp-ef.sel { background: var(--accent-soft); }
+.mp-ef .nm { font-size: 13.5px; font-weight: 600; }
+.mp-ef .ds { font-size: 11px; color: var(--text-3); line-height:1.45; }
+/* 旧的当前卡样式（两栏式后不再用，保留以防万一） */
+
 .model-cur { margin: 6px 10px 4px; padding: 12px 14px; background: var(--bg-card); border: 1px solid var(--accent); border-radius: 13px; }
 .model-cur .mc-tag { font-size: 10.5px; font-weight: 700; color: var(--accent); margin-bottom: 3px; }
 .model-cur .mc-name { font-size: 15.5px; font-weight: 700; }
@@ -857,6 +878,7 @@ html.light .stale-strip .st-x { background:rgba(154,74,6,.12); }
 .q-chip .q-tag { font-size:10.5px; font-weight:700; color:var(--text-3); border:1px solid var(--line); border-radius:8px; padding:1px 6px; flex:none; }
 .q-chip .q-text { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 /* 排队操作单 */
+.meta-steer { font-size: 10px; color: var(--info); border: 1px solid var(--line); border-radius: 6px; padding: 0 5px; flex: none; }
 .q-sheet { max-height:72%; padding-bottom:14px; }
 .q-sheet.editing { max-height:88%; }  /* 编辑长文本：整张单子给足高度（键盘弹出后 72% 只剩很小一块） */
 /* 单子正文可滚动：编辑框不设 max-height 时由这里兜住溢出，长文本不会被 overflow:hidden 裁掉选不中 */
