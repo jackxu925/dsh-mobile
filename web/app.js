@@ -2836,8 +2836,7 @@ function ttsCycleRate() {
   TTS.rate = rs[(rs.indexOf(TTS.rate) + 1) % rs.length] || 1
   try { localStorage.setItem('dshm-tts-rate', String(TTS.rate)) } catch (e) {}
   vibrate(6)
-  if (TTS.on && !TTS.paused) ttsPlayIdx()   // 换语速：当前段按新语速重播（tok 守卫挡掉 cancel 补发的旧事件）
-  else ttsBar()
+  ttsBar()   // 只换档不打断：当前段照常播完，下一段起用新语速（重新起播会从段头复读，用户不要）
 }
 /* 播报条（输入框上方，与排队条同区） */
 function ttsBar() {
