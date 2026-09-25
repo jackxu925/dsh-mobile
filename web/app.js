@@ -1858,6 +1858,14 @@ function prevDirtyMark(sid) { const st = prevDirtyGet(); if (st.has(sid)) return
 function prevDirtyClear(sid) { const st = prevDirtyGet(); if (!st.has(sid)) return; st.delete(sid); try { localStorage.setItem('dshm-prev-dirty', JSON.stringify([...st])) } catch (e) {} }
 function seenGet() { try { return JSON.parse(localStorage.getItem('dshm-seen') || '{}') } catch (e) { return {} } }
 function seenMark(sid, seq) { if (!sid || !seq) return; const m = seenGet(); if (m[sid] >= seq) return; m[sid] = seq; try { localStorage.setItem('dshm-seen', JSON.stringify(m)) } catch (e) {} }
+/* 一次性迁移（v1.9.9）：未读标记上线时所有历史会话都被当成未读——首启把现有全部标为已读，
+   之后新完成的才是未读。用独立标志保证只跑一次。 */
+function seenBootstrap() {
+  try { if (localStorage.getItem('dshm-seen-boot')) return } catch (e) { return }
+  const m = seenGet()
+  for (const s of S.sessions.values()) if (!s.subagent && s.asOfSeq) m[s.id] = s.asOfSeq
+  try { localStorage.setItem('dshm-seen', JSON.stringify(m)); localStorage.setItem('dshm-seen-boot', '1') } catch (e) {}
+}
 function isUnread(s) { const m = seenGet(); return !s.running && s.id !== S.current && (s.asOfSeq || 0) > (m[s.id] || 0) }
 /* 补拉尾部：取最后一条有字的助手消息当列表预览 */
 async function refreshPreview(s, asOf) {
@@ -1869,6 +1877,7 @@ async function refreshPreview(s, asOf) {
       const list = await rpc('session/list', { _request: { limit: 40 } })
       const it = (list.items || []).find((x) => x.sessionId === s.id)
       asOf = (it && it.projections && it.projections.asOfSeq) || 0
+      if (asOf) { s.asOfSeq = asOf; renderListSoon() }   // 未读判断依赖 asOfSeq，顺带刷新
     }
     if (!asOf) { s._tailFetching = false; return }
     const pg = await rpc('session/page', { request: { address: { kind: 'session', sessionId: s.id }, throughSeq: asOf, maxMessages: 16 } })
@@ -1907,6 +1916,7 @@ async function loadBase() {
     }
     // workspace/follow 已提供权威分组（含真实标题/顺序/归档）；仅在还没有时退回 cwd 推导
     if (!S.workspaces.length) deriveWorkspaces()
+    seenBootstrap()   // 列表首次落地后：现有会话一次性全部记为已读（此后新完成的才标未读）
     S.listLoaded = true
     setConn('online')
     renderList()
@@ -2349,6 +2359,7 @@ Mux.handlers.events = (v) => {
         s.subagent = false
         s.blank = !!sum.blank; s.cwd = sum.cwd || ''; s.agentPreset = sum.agentPreset || null
         s.updatedAt = sum.updatedAt || Date.now()
+        s.asOfSeq = (sum.projections && sum.projections.asOfSeq) || s.asOfSeq || 0   // 未读判断要用
         if (sum.projections && sum.projections.values) applyListValues(s, sum.projections.values)
         if (!S.workspaces.length) deriveWorkspaces()
         renderListSoon()
