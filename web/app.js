@@ -551,6 +551,7 @@ function foldEvent(s, event, view) {
       if (!text.trim()) { s._thinkBuf = (s._thinkBuf || '') + reasoning; break }
       s.items.push({ kind: 'assistant', text, reasoning: takeThinkBuf(s) + reasoning, time: event.time, seq: event.seq, turn: d.turn, usage: d.usage || null })
       s.lastPreview = text
+      prevDirtyClear(s.id)
       break
     }
     case 'assistant/chunk': {
@@ -616,6 +617,7 @@ function foldEvent(s, event, view) {
       break
     case 'turn/end': {
       s.running = false
+      if (S.current === s.id) seenMark(s.id, event.seq)   // 正看着：这轮的回复不用再标未读
       // 自动朗读（默认关）：本轮最后一条有字的助手消息，稍等半秒开读
       if (ttsAuto() && s.loaded && S.current === s.id) {
         const lastA = [...s.items].reverse().find((i) => i.kind === 'assistant' && i.text && i.text.trim())
@@ -1505,6 +1507,7 @@ function sessionCard(s, showWs) {
   card.setAttribute('tabindex', '0')
   const row1 = el('div', 'row1')
   row1.appendChild(el('span', 's-title', sessTitle(s)))
+  if (isUnread(s)) row1.appendChild(el('span', 's-unread', ''))
   row1.appendChild(el('span', 's-time', fmtTime(s.updatedAt)))
   card.appendChild(row1)
   if (s.lastPreview) card.appendChild(el('div', 's-preview', s.lastPreview))
@@ -1847,6 +1850,42 @@ function applyStats(s, values) {
     if (sheetSession === s.id) renderSheetSoon(s)
   }
 }
+/* ---- 列表新鲜度：预览脏标记（发过问题还没被回答文本覆盖）与未读（看过到哪） ----
+ * 预览滞后根因：lastPreview 只在 foldEvent 里更新，而后台完成的会话不进 follow 流——
+ * 列表上就一直停在你提问的文本，直到点进去折叠历史才换。 */
+function prevDirtyGet() { try { return new Set(JSON.parse(localStorage.getItem('dshm-prev-dirty') || '[]')) } catch (e) { return new Set() } }
+function prevDirtyMark(sid) { const st = prevDirtyGet(); if (st.has(sid)) return; st.add(sid); try { localStorage.setItem('dshm-prev-dirty', JSON.stringify([...st].slice(-60))) } catch (e) {} }
+function prevDirtyClear(sid) { const st = prevDirtyGet(); if (!st.has(sid)) return; st.delete(sid); try { localStorage.setItem('dshm-prev-dirty', JSON.stringify([...st])) } catch (e) {} }
+function seenGet() { try { return JSON.parse(localStorage.getItem('dshm-seen') || '{}') } catch (e) { return {} } }
+function seenMark(sid, seq) { if (!sid || !seq) return; const m = seenGet(); if (m[sid] >= seq) return; m[sid] = seq; try { localStorage.setItem('dshm-seen', JSON.stringify(m)) } catch (e) {} }
+function isUnread(s) { const m = seenGet(); return !s.running && s.id !== S.current && (s.asOfSeq || 0) > (m[s.id] || 0) }
+/* 补拉尾部：取最后一条有字的助手消息当列表预览 */
+async function refreshPreview(s, asOf) {
+  if (s._tailFetching) return
+  s._tailFetching = true
+  try {
+    if (!asOf) {
+      // status 事件不带 seq：先取一次最新 asOf（page 的 throughSeq 是必填，缺了会被网关拒）
+      const list = await rpc('session/list', { _request: { limit: 40 } })
+      const it = (list.items || []).find((x) => x.sessionId === s.id)
+      asOf = (it && it.projections && it.projections.asOfSeq) || 0
+    }
+    if (!asOf) { s._tailFetching = false; return }
+    const pg = await rpc('session/page', { request: { address: { kind: 'session', sessionId: s.id }, throughSeq: asOf, maxMessages: 16 } })
+    const recs = (pg.records || []).map((r) => r.event || r).filter(Boolean)
+    for (let i = recs.length - 1; i >= 0; i--) {
+      const e = recs[i]
+      if (e.type !== 'assistant/message') continue
+      const text = ((e.data && (e.data.message ? e.data.message.content : e.data.content)) || []).filter((b) => b.type === 'text').map((b) => b.text || '').join('').trim()
+      if (text) {
+        if (S.current !== s.id) { s.lastPreview = text.slice(0, 80); renderListSoon() }
+        prevDirtyClear(s.id)
+        break
+      }
+    }
+  } catch (e) { /* 下次轮询再试 */ }
+  s._tailFetching = false
+}
 async function loadBase() {
   try {
     const list = await rpc('session/list', { _request: {} })
@@ -1855,8 +1894,12 @@ async function loadBase() {
       s.subagent = item.origin === 'subagent'
       if (item.parentSessionId) s.parentSessionId = item.parentSessionId  // 子代理 follow 需要父地址
       if (s.subagent) continue
+      const wasRunning = s.running
       s.updatedAt = item.updatedAt || 0
+      s.asOfSeq = (item.projections && item.projections.asOfSeq) || 0
       s.running = !!item.running
+      // 后台跑完了 / 上一条还是提问文本：补拉尾部把预览换成回答（会话正开着的不用，fold 会实时换）
+      if (S.current !== item.sessionId && !s.running && s.asOfSeq > 0 && (wasRunning || prevDirtyGet().has(item.sessionId))) refreshPreview(s, s.asOfSeq)
       s.blank = !!item.blank
       s.cwd = item.cwd || ''
       s.agentPreset = item.agentPreset || null
@@ -1878,7 +1921,7 @@ async function loadHistory(s) {
   if (s.subagent && !s.parentSessionId) await loadBase().catch(() => {})
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => { s._resolveLoad = null; s._rejectLoad = null; reject(new Error('加载超时')) }, 12000)
-    s._resolveLoad = () => { clearTimeout(timer); resolve() }
+    s._resolveLoad = () => { clearTimeout(timer); seenMark(s.id, Math.max(s.asOfSeq || 0, ...(s.items || []).map((x) => x.seq || 0))); resolve() }   // 折叠完成＝这之前的都看过了
     s._rejectLoad = (err) => { clearTimeout(timer); s._resolveLoad = null; reject(err) }
     if (!Mux.setFollow(s.id, true)) {
       clearTimeout(timer); s._resolveLoad = null; s._rejectLoad = null
@@ -2325,8 +2368,12 @@ Mux.handlers.events = (v) => {
         break
       }
       case 'api-session/status': {
-        const s = sess(a[0]); s.running = !!a[1]
+        const s = sess(a[0])
+        const wasRunning = s.running
+        s.running = !!a[1]
         if (S.current === s.id) refreshChatChrome(s)
+        // 后台跑完了：列表预览还停在提问文本上——立即补拉尾部换成回答（asOfSeq 可能滞后，不带上限）
+        if (wasRunning && !s.running && S.current !== s.id) refreshPreview(s, 0)
         renderListSoon()
         break
       }
@@ -3709,6 +3756,7 @@ async function sendPrompt(id, text, images, forceMode, reuseRpcId) {
   s.items.push(item)
   s.updatedAt = Date.now()
   s.lastPreview = text || '[图片]'
+  prevDirtyMark(id)   // 预览现在停在提问文本上；回答落地（follow 折叠或后台补拉）后清除
   s.follow = true  // 自己发消息：必然想看到最新
   ttsStop()   // 开口说话比听更重要：发消息即停朗读
   if (S.current === id) renderChat(s, true)

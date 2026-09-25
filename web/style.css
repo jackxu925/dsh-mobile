@@ -747,6 +747,7 @@ html.light .queue-chip { border-color: rgba(15,23,42,.22); }
 @keyframes tkd-wave { 0%,100% { transform:translateY(0); opacity:.5 } 50% { transform:translateY(-2.4px); opacity:1 } }
 /* 思考抽屉（复用 .sheet 的外观与手势） */
 .think-sheet { max-height:76%; }
+.s-unread { width: 9px; height: 9px; border-radius: 50%; background: var(--accent); flex: none; margin-left: auto; box-shadow: 0 0 6px rgba(59,130,246,.5); }
 /* 朗读播报条（输入框上方，与排队条同区） */
 .tts-bar { display:none; align-items:center; gap:10px; margin:0 12px 6px; padding:8px 12px; background:var(--bg-elev); border:1px solid var(--line); border-radius:13px; }
 .tts-bar.show { display:flex; }
