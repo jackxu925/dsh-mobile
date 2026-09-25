@@ -105,6 +105,7 @@ const ICONS = {
   sun: SVG_OPEN + '<circle cx="12" cy="12" r="4"/><path d="M12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22M4.9 4.9l1.8 1.8M17.3 17.3l1.8 1.8M19.1 4.9l-1.8 1.8M6.7 17.3l-1.8 1.8"/></svg>',
   moon: SVG_OPEN + '<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>',
   copy: SVG_OPEN + '<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>',
+  speaker: SVG_OPEN + '<path d="M3 9.5v5h3.5L12 19V5L6.5 9.5z"/><path d="M15.5 8.8a4.6 4.6 0 0 1 0 6.4M18 6.3a8 8 0 0 1 0 11.4"/>',
   brain: SVG_OPEN + '<path d="M9.5 3a2.5 2.5 0 0 0-2.5 2.5c0 .4.1.7.2 1A3.5 3.5 0 0 0 5 13.5a3.5 3.5 0 0 0 2.2 6.2A2.5 2.5 0 0 0 11 21V5.5A2.5 2.5 0 0 0 9.5 3z"/><path d="M14.5 3a2.5 2.5 0 0 1 2.5 2.5c0 .4-.1.7-.2 1a3.5 3.5 0 0 1 2.2 7A3.5 3.5 0 0 1 16.8 19.7 2.5 2.5 0 0 1 13 21V5.5A2.5 2.5 0 0 1 14.5 3z"/></svg>',
   /* 思考图标（用户选定「打字泡」）：气泡里三颗点，live 时 CSS 驱动波浪 */
   think: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5l1.9 5.6 5.6 1.9-5.6 1.9L12 18.5l-1.9-5.6-5.6-1.9 5.6-1.9z"/><path d="M18.5 3l.6 1.9 1.9.6-1.9.6-.6 1.9-.6-1.9-1.9-.6 1.9-.6z" stroke-width="1.2"/></svg>',
@@ -615,6 +616,11 @@ function foldEvent(s, event, view) {
       break
     case 'turn/end': {
       s.running = false
+      // 自动朗读（默认关）：本轮最后一条有字的助手消息，稍等半秒开读
+      if (ttsAuto() && s.loaded && S.current === s.id) {
+        const lastA = [...s.items].reverse().find((i) => i.kind === 'assistant' && i.text && i.text.trim())
+        if (lastA) setTimeout(() => { if (S.current === s.id) ttsSpeak(s, lastA) }, 500)
+      }
       // 轮级统计：turn/start→turn/end 的时长 + 本轮各步 usage 汇总（事件驱动累计，纯思考/工具步不渲染但也要算）
       const durMs = s._turnStartAt ? Math.max(0, event.time - s._turnStartAt) : 0
       const curTurn = s._curTurn
@@ -1194,6 +1200,10 @@ function itemNodeInner(s, item) {
         const cp = metaIcon('copy', '复制这条消息')
         cp.onclick = () => { vibrate(8); copyText(item.text, (ok) => toast(ok ? '已复制 ✓' : '复制失败，请重试', !ok)) }
         meta.appendChild(cp)
+        const sp = metaIcon('speaker', '朗读这条回答')
+        sp.classList.add('tts-ico')
+        sp.onclick = () => { vibrate(8); ttsToggle(s, item) }
+        meta.appendChild(sp)
       }
       const aq = metaIcon('quote', '引用这条回答')
       aq.onclick = () => quoteNow(s.id, '助手', item.text)
@@ -2736,6 +2746,123 @@ function renderStaleStrip() {
   x.onclick = () => { S.staleNotice = null; renderStaleStrip(); vibrate(8) }
   strip.appendChild(x)
 }
+/* ================= 朗读（TTS）：Web Speech API，本地免费、即点即播 =================
+ * 交互（与用户确认过的方案）：助手消息 meta 行 🔊＝朗读该条；播放时输入框上方浮播报条
+ *（⏸ · 第 i/N 段 · 语速 · ✕）；⋯ 里「自动朗读」开关（默认关，轮结束自动读最后一条）；
+ * 发新消息/停止/切会话自动停；代码块跳过、markdown 转口语、按句排队（绕开 iOS 长文截断）。 */
+const TTS = { on: false, paused: false, chunks: [], idx: 0, rate: (() => { try { return parseFloat(localStorage.getItem('dshm-tts-rate')) || 1 } catch (e) { return 1 } })(), voice: null, hot: false, key: null }
+function ttsAuto() { try { return localStorage.getItem('dshm-tts-auto') === '1' } catch (e) { return false } }
+function ttsSetAuto(v) { try { localStorage.setItem('dshm-tts-auto', v ? '1' : '0') } catch (e) {} }
+function ttsPickVoice() {
+  if (!window.speechSynthesis) return
+  const vs = speechSynthesis.getVoices() || []
+  TTS.voice = vs.find((v) => /zh[-_]CN/i.test(v.lang) && /Ting|婷|Yu\b|Xiaoxiao|晓/i)
+    || vs.find((v) => /^zh/i.test(v.lang))
+    || vs.find((v) => /^en/i.test(v.lang))
+    || null
+}
+if (window.speechSynthesis) { ttsPickVoice(); speechSynthesis.addEventListener('voiceschanged', ttsPickVoice) }
+/* 朗读前的文本预处理：代码块跳过、markdown 转口语、链接不逐字读 */
+function ttsPrepare(t) {
+  let x = String(t || '')
+  x = x.replace(/```[\s\S]*?```/g, '（代码略过。）')
+  x = x.replace(/`([^`]+)`/g, '$1')
+  x = x.replace(/!\[[^\]]*\]\([^)]*\)/g, '（图片）')
+  x = x.replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+  x = x.replace(/https?:\/\/\S+/g, '（链接）')
+  x = x.replace(/^[#>\s\-*•·]{0,6}/gm, '')
+  x = x.replace(/[*_~|`]/g, '')
+  x = x.replace(/\n{2,}/g, '\n').replace(/[ \t]+/g, ' ').trim()
+  return x
+}
+/* 按句切段（不用 lookbehind，老 Safari 兼容），每段 ~120-160 字 */
+function ttsChunks(x) {
+  const parts = x.replace(/([。！？；!?;\n])/g, '$1\u0001').split('\u0001').map((t) => t.trim()).filter(Boolean)
+  const out = []
+  let buf = ''
+  for (const pt of parts) {
+    buf += pt
+    if (buf.length >= 120) { out.push(buf); buf = '' }
+  }
+  if (buf) out.push(buf)
+  return out.slice(0, 80)
+}
+function ttsToggle(s, item) {
+  const key = s.id + '#' + (item.seq != null ? item.seq : (item.text || '').slice(0, 20))
+  if (TTS.on && TTS.key === key) { ttsPauseResume(); return }
+  ttsSpeak(s, item)
+}
+function ttsSpeak(s, item) {
+  if (!window.speechSynthesis) { toast('此环境不支持语音朗读', true); return }
+  ttsStop(true)
+  const pre = ttsPrepare(item.text)
+  if (!pre) { toast('这条没有可朗读的文本', true); return }
+  TTS.chunks = ttsChunks(pre)
+  if (!TTS.chunks.length) { toast('这条没有可朗读的文本', true); return }
+  TTS.on = true; TTS.paused = false; TTS.idx = 0
+  TTS.key = s.id + '#' + (item.seq != null ? item.seq : (item.text || '').slice(0, 20))
+  ttsPlayIdx()
+}
+function ttsPlayIdx() {
+  if (!TTS.on || TTS.idx >= TTS.chunks.length) { ttsStop(); return }
+  const u = new SpeechSynthesisUtterance(TTS.chunks[TTS.idx])
+  u.lang = 'zh-CN'
+  if (TTS.voice) u.voice = TTS.voice
+  u.rate = TTS.rate
+  u.onend = () => { if (TTS.hot) return; TTS.idx++; ttsPlayIdx() }
+  u.onerror = () => { if (TTS.hot) return; TTS.idx++; ttsPlayIdx() }
+  TTS.hot = false
+  speechSynthesis.cancel()
+  speechSynthesis.speak(u)
+  ttsBar()
+}
+function ttsPauseResume() {
+  if (!TTS.on) return
+  if (TTS.paused) { speechSynthesis.resume(); TTS.paused = false }
+  else { speechSynthesis.pause(); TTS.paused = true }
+  ttsBar()
+}
+function ttsStop(silent) {
+  TTS.on = false; TTS.paused = false; TTS.chunks = []; TTS.idx = 0; TTS.key = null; TTS.hot = false
+  if (window.speechSynthesis) speechSynthesis.cancel()
+  ttsBar()
+}
+function ttsCycleRate() {
+  const rs = [1, 1.25, 1.5, 2]
+  TTS.rate = rs[(rs.indexOf(TTS.rate) + 1) % rs.length] || 1
+  try { localStorage.setItem('dshm-tts-rate', String(TTS.rate)) } catch (e) {}
+  vibrate(6)
+  if (TTS.on && !TTS.paused) { TTS.hot = true; ttsPlayIdx() }   // 换语速：当前段重播
+  else ttsBar()
+}
+/* 播报条（输入框上方，与排队条同区） */
+function ttsBar() {
+  const bar = $('#tts-bar')
+  if (!bar) return
+  if (!TTS.on) { bar.classList.remove('show'); bar.textContent = ''; return }
+  bar.classList.add('show')
+  bar.textContent = ''
+  const pp = el('button', 'tts-pp', TTS.paused ? '▶' : '⏸')
+  pp.type = 'button'
+  pp.setAttribute('aria-label', TTS.paused ? '继续' : '暂停')
+  pp.onclick = () => { vibrate(6); ttsPauseResume() }
+  const info = el('div', 'tts-info', (TTS.paused ? '已暂停' : '正在播报') + ' · ')
+  info.appendChild(el('b', null, (TTS.idx + 1) + '/' + TTS.chunks.length + ' 段'))
+  const rt = el('button', 'tts-rate', (TTS.rate % 1 ? String(TTS.rate).replace(/0$/, '') : String(TTS.rate)) + '×')
+  rt.type = 'button'
+  rt.onclick = ttsCycleRate
+  const x = el('button', 'tts-x', '✕')
+  x.type = 'button'
+  x.setAttribute('aria-label', '停止朗读')
+  x.onclick = () => { vibrate(6); ttsStop() }
+  bar.append(pp, info, rt, x)
+}
+/* iOS：首次朗读必须在用户手势里发生——开自动朗读时用一条空播报热身 */
+function ttsWarm() {
+  if (!window.speechSynthesis) return
+  try { const u = new SpeechSynthesisUtterance(' '); speechSynthesis.cancel(); speechSynthesis.speak(u) } catch (e) {}
+}
+
 /* ---- 排队/插话 chip 条（输入框上方固定，点按出操作单） ---- */
 function renderQueueStrip(s) {
   const strip = $('#q-strip')
@@ -3317,6 +3444,7 @@ function closeProto() { if (protoView) { protoView.remove(); protoView = null } 
 
 function route() {
   const h = location.hash || '#/'
+  ttsStop()   // 切走就别念了
   if (h === '#/proto') { S.current = null; showProto(); return }
   closeProto()
   if (h.startsWith('#/s/')) { openSession(decodeURIComponent(h.slice(4))); updateTabs(); return }
@@ -3579,6 +3707,7 @@ async function sendPrompt(id, text, images, forceMode, reuseRpcId) {
   s.updatedAt = Date.now()
   s.lastPreview = text || '[图片]'
   s.follow = true  // 自己发消息：必然想看到最新
+  ttsStop()   // 开口说话比听更重要：发消息即停朗读
   if (S.current === id) renderChat(s, true)
   renderListSoon()
   const content = []
@@ -3787,6 +3916,27 @@ function renderSheet(s) {
   c.appendChild(valueRow('权限', '文件与命令的边界', permName(), () => openPermPanel(s)))
   // ---- 运行中发送 ----
   c.appendChild(valueRow('运行中发送', '排队或插话', busyEnter() === 'queue' ? '排队' : '插话', () => openSendPanel(s)))
+  // 自动朗读开关：直接切换（不需要二级面板）
+  {
+    const row = btnize(el('div', 'sheet-row'))
+    const mid = el('div'); mid.style.minWidth = '0'; mid.style.flex = '1'
+    mid.appendChild(el('div', 'r-name', '自动朗读回答'))
+    mid.appendChild(el('div', 'r-desc', '每轮回答完成后自动语音播报（代码块跳过）'))
+    row.appendChild(mid)
+    const sw = el('span', 'tg-sw' + (ttsAuto() ? ' on' : ''))
+    sw.setAttribute('role', 'switch')
+    sw.setAttribute('aria-checked', ttsAuto() ? 'true' : 'false')
+    row.appendChild(sw)
+    row.onclick = () => {
+      vibrate(8)
+      const nv = !ttsAuto()
+      ttsSetAuto(nv)
+      sw.classList.toggle('on', nv)
+      sw.setAttribute('aria-checked', nv ? 'true' : 'false')
+      if (nv) { ttsWarm(); toast('已开启：回答完成后自动朗读') } else { ttsStop(); toast('已关闭自动朗读') }
+    }
+    c.appendChild(row)
+  }
   // ---- 统计（摘要值，点开看全量）----
   const p = s.ctxPressure
   const statVal = p && p.contextWindow ? Math.round(p.pressureTokens / p.contextWindow * 100) + '% · ' + fmtCtxTok(p.pressureTokens) : '—'
@@ -4707,6 +4857,7 @@ function buildShell() {
       <div class="qd-foot" id="qd-foot"></div>
     </div>
     <div class="composer-wrap">
+      <div class="tts-bar" id="tts-bar"></div>
       <div class="stale-strip" id="stale-strip" style="display:none"></div>
       <div class="stale-strip off" id="offline-strip" style="display:none"></div>
       <div class="q-strip" id="q-strip"></div>

@@ -747,6 +747,19 @@ html.light .queue-chip { border-color: rgba(15,23,42,.22); }
 @keyframes tkd-wave { 0%,100% { transform:translateY(0); opacity:.5 } 50% { transform:translateY(-2.4px); opacity:1 } }
 /* 思考抽屉（复用 .sheet 的外观与手势） */
 .think-sheet { max-height:76%; }
+/* 朗读播报条（输入框上方，与排队条同区） */
+.tts-bar { display:none; align-items:center; gap:10px; margin:0 12px 6px; padding:8px 12px; background:var(--bg-elev); border:1px solid var(--line); border-radius:13px; }
+.tts-bar.show { display:flex; }
+.tts-bar .tts-pp, .tts-bar .tts-x { background:var(--bg-card); border:none; color:var(--text); width:30px; height:30px; border-radius:50%; font-size:13px; flex:none; }
+.tts-bar .tts-pp { background:var(--accent-fill); color:#fff; }
+.tts-bar .tts-info { flex:1; min-width:0; font-size:12.5px; color:var(--text-2); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.tts-bar .tts-info b { color:var(--text); font-variant-numeric:tabular-nums; }
+.tts-bar .tts-rate { background:none; border:1px solid var(--line); color:var(--accent); border-radius:9px; font-size:12px; padding:4px 9px; flex:none; font-variant-numeric:tabular-nums; }
+/* 开关（自动朗读） */
+.tg-sw { flex:none; width:44px; height:26px; border-radius:13px; background:var(--bg-card-2); border:1px solid var(--line); position:relative; transition:background .2s; }
+.tg-sw::after { content:""; position:absolute; top:2.5px; left:3px; width:19px; height:19px; border-radius:50%; background:#fff; transition:left .2s; }
+.tg-sw.on { background:var(--green); border-color:var(--green); }
+.tg-sw.on::after { left:20px; }
 /* 电话记录（逐轮 input/output） */
 .how-cta.ghost { background:var(--bg-card); color:var(--text); border:1px solid var(--line); margin-top:9px; }
 .how-dlgmeta { font-size:12px; color:var(--text-3); margin:6px 0 14px; }
