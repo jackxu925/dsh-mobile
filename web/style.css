@@ -635,16 +635,17 @@ html.light .q-handle { background:rgba(240,242,246,.8); color:#4b5563; }
 .q-scrim { position:absolute; inset:0; z-index:6; background:rgba(0,0,0,.32); opacity:0; pointer-events:none; visibility:hidden; transition:opacity .2s var(--ease-out), visibility .2s; }
 .q-scrim.open { opacity:1; pointer-events:auto; visibility:visible; }
 /* 抽屉：从右缘展开，列表 + 底部加载状态；内容是全量（不只当前屏） */
-.q-drawer { position:absolute; top:12%; bottom:18%; right:0; z-index:7; width:min(76vw, 320px); display:flex; flex-direction:column;
+.q-drawer { position:absolute; top:0; bottom:0; right:0; z-index:7; width:min(76vw, 320px); display:flex; flex-direction:column;
   background:var(--bg-elev); border:1px solid var(--line); border-right:none; border-radius:16px 0 0 16px;
   box-shadow:-16px 0 44px rgba(2,8,23,.4); transform:translateX(105%); transition:transform .26s var(--ease-drawer); overflow:hidden; }
+  /* 贯穿全高（用户：没必要上下留空）；底部避开 iPhone 小横条 */
 .q-drawer.open { transform:none; }
 .qd-head { flex:none; display:flex; align-items:center; gap:8px; padding:12px 14px 8px; }
 .qd-title { font-size:15px; font-weight:700; }
 .qd-cnt { flex:1; font-size:11px; color:var(--text-3); }
 .qd-list { flex:1; min-height:0; overflow-y:auto; -webkit-overflow-scrolling:touch; scrollbar-width:none; }
 .qd-list::-webkit-scrollbar { display:none; }
-.qd-foot { flex:none; }
+.qd-foot { flex:none; padding-bottom:env(safe-area-inset-bottom, 0px); }
 .q-foot { display:flex; align-items:center; gap:8px; padding:10px 20px 20px; font-size:12px; color:var(--text-3); }
 .q-spin { flex:none; width:13px; height:13px; border-radius:50%; border:2px solid var(--line); border-top-color:var(--accent); animation:qspin .8s linear infinite; }
 @keyframes qspin { to { transform:rotate(360deg); } }
