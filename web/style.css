@@ -750,8 +750,8 @@ html.light .queue-chip { border-color: rgba(15,23,42,.22); }
 /* 朗读播报条（输入框上方，与排队条同区） */
 .tts-bar { display:none; align-items:center; gap:10px; margin:0 12px 6px; padding:8px 12px; background:var(--bg-elev); border:1px solid var(--line); border-radius:13px; }
 .tts-bar.show { display:flex; }
-.tts-bar .tts-pp, .tts-bar .tts-x { background:var(--bg-card); border:none; color:var(--text); width:30px; height:30px; border-radius:50%; font-size:13px; flex:none; }
-.tts-bar .tts-pp { background:var(--accent-fill); color:#fff; }
+.tts-bar .tts-pp, .tts-bar .tts-x { background:none; border:none; color:var(--text-2); width:30px; height:30px; font-size:15px; flex:none; display:flex; align-items:center; justify-content:center; }
+.tts-bar .tts-pp { color:var(--accent); font-size:16px; }   /* 主操作用强调色图标，不用实心圆底 */
 .tts-bar .tts-info { flex:1; min-width:0; font-size:12.5px; color:var(--text-2); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .tts-bar .tts-info b { color:var(--text); font-variant-numeric:tabular-nums; }
 .tts-bar .tts-rate { background:none; border:1px solid var(--line); color:var(--accent); border-radius:9px; font-size:12px; padding:4px 9px; flex:none; font-variant-numeric:tabular-nums; }

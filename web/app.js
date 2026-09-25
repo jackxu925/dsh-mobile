@@ -2750,7 +2750,7 @@ function renderStaleStrip() {
  * 交互（与用户确认过的方案）：助手消息 meta 行 🔊＝朗读该条；播放时输入框上方浮播报条
  *（⏸ · 第 i/N 段 · 语速 · ✕）；⋯ 里「自动朗读」开关（默认关，轮结束自动读最后一条）；
  * 发新消息/停止/切会话自动停；代码块跳过、markdown 转口语、按句排队（绕开 iOS 长文截断）。 */
-const TTS = { on: false, paused: false, chunks: [], idx: 0, rate: (() => { try { return parseFloat(localStorage.getItem('dshm-tts-rate')) || 1 } catch (e) { return 1 } })(), voice: null, hot: false, key: null }
+const TTS = { on: false, paused: false, chunks: [], idx: 0, rate: (() => { try { return parseFloat(localStorage.getItem('dshm-tts-rate')) || 1 } catch (e) { return 1 } })(), voice: null, key: null, tok: 0 }
 function ttsAuto() { try { return localStorage.getItem('dshm-tts-auto') === '1' } catch (e) { return false } }
 function ttsSetAuto(v) { try { localStorage.setItem('dshm-tts-auto', v ? '1' : '0') } catch (e) {} }
 function ttsPickVoice() {
@@ -2805,13 +2805,16 @@ function ttsSpeak(s, item) {
 }
 function ttsPlayIdx() {
   if (!TTS.on || TTS.idx >= TTS.chunks.length) { ttsStop(); return }
+  // 代际令牌：换语速/停止都会 cancel 当前语句，而 iOS 的 cancel 会让旧语句异步补发 onend——
+  // 没有守卫就会被当成「播完」推进段号，连跳到尾直接停播。令牌对不上的事件一律忽略。
+  TTS.tok++
+  const myTok = TTS.tok
   const u = new SpeechSynthesisUtterance(TTS.chunks[TTS.idx])
   u.lang = 'zh-CN'
   if (TTS.voice) u.voice = TTS.voice
   u.rate = TTS.rate
-  u.onend = () => { if (TTS.hot) return; TTS.idx++; ttsPlayIdx() }
-  u.onerror = () => { if (TTS.hot) return; TTS.idx++; ttsPlayIdx() }
-  TTS.hot = false
+  u.onend = () => { if (myTok !== TTS.tok) return; TTS.idx++; ttsPlayIdx() }
+  u.onerror = () => { if (myTok !== TTS.tok) return; TTS.idx++; ttsPlayIdx() }
   speechSynthesis.cancel()
   speechSynthesis.speak(u)
   ttsBar()
@@ -2823,7 +2826,8 @@ function ttsPauseResume() {
   ttsBar()
 }
 function ttsStop(silent) {
-  TTS.on = false; TTS.paused = false; TTS.chunks = []; TTS.idx = 0; TTS.key = null; TTS.hot = false
+  TTS.tok++   // 让在途语句的 onend 全部失效
+  TTS.on = false; TTS.paused = false; TTS.chunks = []; TTS.idx = 0; TTS.key = null
   if (window.speechSynthesis) speechSynthesis.cancel()
   ttsBar()
 }
@@ -2832,7 +2836,7 @@ function ttsCycleRate() {
   TTS.rate = rs[(rs.indexOf(TTS.rate) + 1) % rs.length] || 1
   try { localStorage.setItem('dshm-tts-rate', String(TTS.rate)) } catch (e) {}
   vibrate(6)
-  if (TTS.on && !TTS.paused) { TTS.hot = true; ttsPlayIdx() }   // 换语速：当前段重播
+  if (TTS.on && !TTS.paused) ttsPlayIdx()   // 换语速：当前段按新语速重播（tok 守卫挡掉 cancel 补发的旧事件）
   else ttsBar()
 }
 /* 播报条（输入框上方，与排队条同区） */
