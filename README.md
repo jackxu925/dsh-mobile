@@ -8,12 +8,41 @@ DeepSeek Harness 的手机端界面插件：在 `dsh web` 服务上挂载 `/m` �
 - 页面直接调用 DSH 自己的 `/api`（与桌面 GUI 完全相同的协议：`POST /api/<method>`、`POST /api/respond`、`ws://…/api/events.mux` 下行帧），零业务逻辑重复，天然支持 Tailscale（沿用现有 trusted-host 信任围栏）。
 - 桌面端「设置 → 手机端」会显示入口地址（`client/client.js`）。
 
-## 安装
+## 安装（给其他 DSH 用户）
+
+前置：已安装桌面版 DSH（`dsh` CLI 可用）。
+
+1. 建一个（或复用你现有的）web profile，`~/.dsh/profiles/web/package.json`：
+
+```json
+{
+  "name": "dsh-profile-web",
+  "private": true,
+  "dependencies": {
+    "dsh-mobile": "github:jackxu925/dsh-mobile"
+  },
+  "dsh": {
+    "profile": {
+      "bundles": [
+        "@deepseek-ai/dsh-base",
+        "@deepseek-ai/dsh-web-app",
+        "dsh-mobile"
+      ]
+    }
+  }
+}
+```
+
+2. 安装依赖并启动（手机从外部访问时把你的域名加进信任围栏）：
 
 ```bash
-# 在 profile 的 package.json 里加依赖 "dsh-mobile": "file:<此目录>" 并把 "dsh-mobile" 加进 dsh.profile.bundles
-# （本仓库首次安装时已自动完成），然后重启 dsh web。
+cd ~/.dsh/profiles/web && npm install
+dsh --profile web --host 0.0.0.0 --port 3080 --trusted-host <你的访问域名>
 ```
+
+3. 手机浏览器打开 `http://<主机地址>:3080/m/`，分享到主屏幕即为全屏 PWA。
+
+> 升级：`package.json` 里改成指定 tag/commit（如 `"github:jackxu925/dsh-mobile#v1.10.1"`）后重新 `npm install` 并重启 `dsh web`。本插件只挂载静态页面与转发，协议层完全复用 DSH 自带的 `/api`，跟着你的 DSH 版本走。
 
 ## 手机访问
 
